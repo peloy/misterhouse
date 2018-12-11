@@ -3,11 +3,14 @@
 # $Date$
 # $Revision$
 
-#@ Retrieves current weather conditions and forecasts using bin/get_weather (US only).
-#@ You will need to set the city and state parms in your ini file.
+#@ Retrieves current weather conditions and forecasts using bin/get_weather (US only). (MH5 Updated)
+#@ You will need to set the city, zone, and state parms in your ini file.
 #@ To verify your city, click <a href="http://iwin.nws.noaa.gov/iwin/iwdspg1.html">here</a>,
 #@ then click on your state, then click on "Hourly Reports".  If your city
-#@ is not listed in the report, pick the closest one.
+#@ is not listed in the report, pick the closest one.  The zone is usually
+#@ the same as your city, but not always.  To verify your zone,
+#@ hit the Back button and click on "Zone Forecast".  Zone names precede each
+#@ forecast and each is followed by a hyphen.
 #@ To modify when this script is run (or to disable it), go to the
 #@ <a href="/bin/triggers.pl"> triggers page </a> and modify the
 #@ 'get internet weather conditions' and 'get internet weather forecast' triggers.
@@ -16,30 +19,19 @@ use Weather_Common;
 
 #noloop=start
 # Get both the current weather data and forecast from the Internet
-$v_get_internet_weather_data =
-  new Voice_Cmd('[Get,Check,Mail,SMS] Internet weather data');
-$v_get_internet_weather_data->set_info(
-    "Retrieves weather conditions and forecasts for $config_parms{city}, $config_parms{state}"
-);
+$v_get_internet_weather_data = new Voice_Cmd('[Get,Check,Mail,SMS] Internet weather data');
+$v_get_internet_weather_data->set_info("Retrieves weather conditions and forecasts for $config_parms{city}, $config_parms{state}, $config_parms{zone}");
 
 # Get the current weather data from the Internet
-$v_get_internet_weather_conditions =
-  new Voice_Cmd('Get the Internet weather conditions');
-$v_get_internet_weather_conditions->set_info(
-    "Retrieves current weather conditions for $config_parms{city}, $config_parms{state}"
-);
+$v_get_internet_weather_conditions = new Voice_Cmd('Get the Internet weather conditions');
+$v_get_internet_weather_conditions->set_info("Retrieves current weather conditions for $config_parms{city}, $config_parms{state}, $config_parms{zone}");
 
 # Get the weather forecast from the Internet
-$v_get_internet_weather_forecast =
-  new Voice_Cmd('Get the Internet weather forecast');
-$v_get_internet_weather_forecast->set_info(
-    "Retrieves weather forecasts for $config_parms{city}, $config_parms{state}"
-);
+$v_get_internet_weather_forecast = new Voice_Cmd('Get the Internet weather forecast');
+$v_get_internet_weather_forecast->set_info("Retrieves weather forecasts for $config_parms{city}, $config_parms{state}, $config_parms{zone}");
 
-$v_show_internet_weather_forecast =
-  new Voice_Cmd( '[Read Internet,What is the] weather forecast', 0 );
-$v_show_internet_weather_forecast->set_info(
-    'Read previously downloaded weather forecast');
+$v_show_internet_weather_forecast = new Voice_Cmd( '[Read Internet,What is the] weather forecast', 0 );
+$v_show_internet_weather_forecast->set_info('Read previously downloaded weather forecast');
 $v_show_internet_weather_forecast->set_authority('anyone');
 
 $v_show_internet_weather_conditions = new Voice_Cmd( '[Read Internet,What are the] weather conditions', 0 );
@@ -52,9 +44,12 @@ my $weather_forecast_path   = "$config_parms{data_dir}/web/weather_forecast.txt"
 my $weather_conditions_path = "$config_parms{data_dir}/web/weather_conditions.txt";
 $f_weather_conditions = new File_Item($weather_conditions_path);
 $f_weather_forecast   = new File_Item($weather_forecast_path);
-$p_weather_data = new Process_Item;
+my $city = $config_parms{city};
+$city                 = $config_parms{nws_city} if defined $config_parms{nws_city};
+$p_weather_data       = new Process_Item;
 $p_weather_conditions = new Process_Item;
 $p_weather_forecast   = new Process_Item;
+$Weather_Common::weather_module_enabled = 1;
 
 #noloop=stop
 
@@ -73,9 +68,8 @@ if ( said $v_get_internet_weather_data) {
     if (&net_connect_check) {
         set $p_weather_data qq|get_weather -state $config_parms{state} -city "$config_parms{city}" -nws_rwr_zone $config_parms{nws_rwr_zone}|;
         start $p_weather_data;
-        $v_get_internet_weather_data->respond(
-            "app=weather Weather data requested for $config_parms{city}, $config_parms{state}"
-        );
+        $v_get_internet_weather_data->respond( "app=weather Weather data requested for $config_parms{city}, $config_parms{state}"
+              . ( ( $config_parms{zone} ) ? " Zone $config_parms{zone}" : '' ) );
     }
     else {
         $v_get_internet_weather_data->respond("app=weather You must be connected to the Internet get weather data");
@@ -87,9 +81,8 @@ if ( said $v_get_internet_weather_conditions) {
         set $p_weather_conditions
           qq|get_weather -state $config_parms{state} -city "$config_parms{city}" -data conditions -nws_rwr_zone $config_parms{nws_rwr_zone}|;
         start $p_weather_conditions;
-        $v_get_internet_weather_conditions->respond(
-            "app=weather Weather conditions requested for $config_parms{city}, $config_parms{state}"
-        );
+        $v_get_internet_weather_conditions->respond( "app=weather Weather conditions requested for $config_parms{city}, $config_parms{state}"
+              . ( ( $config_parms{zone} ) ? " Zone $config_parms{zone}" : '' ) );
     }
     else {
         $v_get_internet_weather_conditions->respond("app=weather You must be connected to the Internet get weather data");
@@ -101,9 +94,8 @@ if ( said $v_get_internet_weather_forecast) {
         set $p_weather_forecast qq|get_weather -state $config_parms{state} -city "$config_parms{city}" -data forecast|;
         print_log "get_weather -state $config_parms{state} -city $config_parms{city} -data forecast";
         start $p_weather_forecast;
-        $v_get_internet_weather_forecast->respond(
-            "app=weather Weather forecast requested for $config_parms{city}, $config_parms{state}"
-        );
+        $v_get_internet_weather_forecast->respond( "app=weather Weather forecast requested for $config_parms{city}, $config_parms{state}"
+              . ( ( $config_parms{zone} ) ? " Zone $config_parms{zone}" : '' ) );
     }
     else {
         $v_get_internet_weather_forecast->respond("app=weather You must be connected to the Internet get weather data");
@@ -199,6 +191,11 @@ if ( done_now $p_weather_data or done_now $p_weather_conditions) {
         if ( $conditions =~ /conditions were (clear|cloudy|partly cloudy|mostly cloudy|sunny|mostly sunny|partly sunny)/ ) {
             $w{Clouds} = lc($1);
         }
+        
+        #be nice to have a full date, but GEO::WeatherNOAA only puts $in->{TIME} in the conditions output
+        if ( $conditions =~ /^At\s(\d\d:\d\d\s\S\S)/ ) {
+            $w{LastUpdated} = lc($1);
+        }        
 
         $w{WindAvgDir} =
           &Weather_Common::convert_wind_dir_text_to_num( $w{WindAvgDir} );

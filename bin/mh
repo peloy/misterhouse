@@ -112,7 +112,7 @@ eof
 }
 
 # Use var instead of my so we can get these in the http_server.pl scripts
-use vars qw($Time_Start_time $Time_Stop_time $Time_Increment $Time_Startup $Time_Startup_time $Time_Boot_time $Time_Uptime_Seconds);
+use vars qw($Time_Start_time $Time_Stop_time $Time_Increment $Time_Startup $Time_Startup_time $Time_Boot_time $Time_Uptime_Seconds $System_cores);
 use vars qw($Time_Sunrise $Time_Sunrise_Twilight $Time_Sunset $Time_Sunset_Twilight %Moon $Time_Now $Time_Date $Date_Now $Date_Now_Speakable $Year_Month_Now);
 use vars qw($Time $Second $Minute $Hour $Mday $Wday $Day $Month $Year);
 use vars qw($New_Second $New_Msecond_500 $New_Msecond_250 $New_Msecond_100 $New_Minute $New_Hour $New_Day $New_Week $New_Month $New_Year);
@@ -133,7 +133,7 @@ my ( $user_code,              $user_code_last_good );
 my ( %objects_by_object_name, %file_by_object_name, %files_by_webname );
 my ( %object_names_by_file,   %object_names_by_type, %object_names_by_webname, $pause_mode );
 my ( @Server_Ports,           @Generic_Devices, %Local_Addresses, @Local_Addresses, %Passwords, @Password_Allow_Clients );
-my ( %proxy_servers,          %app_parms );
+my ( %proxy_servers,          %app_parms, %waiter_flags );
 my ( $CON_IN,                 $CON_OUT );
 
 my ( $state, $temp );        # Some generic useful vars
@@ -797,6 +797,10 @@ sub setup {
     }
     else {
         require 'json_server.pl';
+
+	# Actions on Google HTTP helper
+	require 'http_server_aog.pl';
+	http_server_aog_startup();
     }
 
     if ($OS_win) {
@@ -850,6 +854,9 @@ sub setup {
     mkdir( "$config_parms{html_dir}/tv/clicktv", 0777 )
       unless -d "$config_parms{html_dir}/tv/clicktv";
 
+    $config_parms{http_persist} = 1 
+	unless defined($config_parms{http_persist});
+
     $Time_Date = &time_date_stamp( $config_parms{time_format_log}, $Time );    # Needed by print_log
 
     &open_logs;
@@ -886,9 +893,8 @@ sub setup {
         #        my $break    = $config_parms{$port_name . "_break"};
 
         $proto = 'tcp' unless $proto;
-        $datatype = 'buffered' if $port_name eq 'http';
-        $datatype = 'buffered'
-          if $config_parms{ $port_name . "_buffer" };    # Grandfathered syntax
+        $datatype = 'raw' if $port_name eq 'http';
+        $datatype = 'buffered' if $config_parms{ $port_name . "_buffer" };    # Grandfathered syntax
         $datatype = '' unless $datatype;
 
         #       $break = "[\r\n]+" unless $break;
@@ -905,8 +911,8 @@ sub setup {
         $Socket_Ports{$port_name}{address}  = $address if $address;
 
         #       $Socket_Ports{$port_name}{break}    = $break;
-
         &socket_open($port_name);
+	$Socket_Ports{$port_name}{Socket_Item} = new Socket_Item( undef, undef, $port_name ) if $port_name eq 'http';
     }
 
     &AlexaBridge::startup;      # Start the AlexaBridge sockets, in lib/AlexaBridge.pm
@@ -1114,9 +1120,11 @@ sub setup {
         print " - object logging disabled\n";
     }
 
-    # Store boot time in seconds since epoc
+    $System_cores = 1; #default in case we can't determine from system calls
+    # Store boot time in seconds since epoc, and the system cores
     if ($OS_win) {
         $Time_Boot_time = time - &get_tickcount / 1000;    # Gettickcount starts at computer boot
+        $System_cores = $ENV{"NUMBER_OF_PROCESSORS"};
     }
     elsif ( $^O eq 'linux' or $^O eq 'cygwin' ) {
 
@@ -1130,6 +1138,9 @@ sub setup {
         my ( $uptime, $idletime ) = ( <UPTIME> =~ /(\S+) (\S+)/ );
         close UPTIME;
         $Time_Boot_time = time - $uptime;
+        open CPUINFO, "/proc/cpuinfo" or print "\nError: Can't open /proc/cpuinfo ($!)\n";
+        $System_cores =  scalar (map /^processor/, <CPUINFO>) ; 
+        close CPUINFO;
     }
     elsif ( $^O eq 'freebsd' ) {
         open( SYSCTL, "/sbin/sysctl -a |" )
@@ -1137,6 +1148,10 @@ sub setup {
         while (<SYSCTL>) { last if (/boottime/) }
         $Time_Boot_time = $1 if (/ sec[ =]+(\d+)/);
         close(SYSCTL);
+        open( SYSCTLCPU, "/sbin/sysctl hw.ncpu" )
+          or print "\nError: can't open /sbin/sysctl hw.ncpu: $!";
+        $System_cores = $1 if (/hw\.ncpu\s(\d+)/);
+        close(SYSCTLCPU);
     }
     elsif ( $^O eq 'darwin' ) {
 
@@ -1146,6 +1161,8 @@ sub setup {
         use vars qw($sysctl);
         $sysctl         = '/usr/sbin/sysctl';
         $Time_Boot_time = `$sysctl -n kern.boottime`;
+        $System_cores = `$sysctl -n machdep.cpu.core_count`;
+        $System_cores =~ s/\n//;
     }
     else {
         #Sets boot time to a sane value for unknown OSs
@@ -1247,7 +1264,6 @@ sub setup {
     print "Done with setup\n\n";
 
     &ia7_utilities::ia7_update_collection;    #Check if the collections need updating.
-
 }
 
 # Called from generic item *** and undo sub
@@ -2483,7 +2499,7 @@ sub check_for_serial_data {
     }
 }
 
-my ( $leave_socket_open_passes, $leave_socket_open_action, $leave_socket_open_check );
+my ( $leave_socket_open_passes, $leave_socket_open_action, $leave_socket_open_check, $Close_Socket );
 use vars '%socket_fork_data';
 
 sub check_for_socket_data_http {
@@ -2519,67 +2535,31 @@ sub check_for_socket_data_http {
         }
     }
 
-    # Time to finish the http GET from 2 passes ago with a list of spoken data
-    #   if ($leave_socket_open_passes and --$leave_socket_open_passes <= 0 and my $sock = $Socket_Ports{http}{socka}) {
-    if ( $leave_socket_open_action and ( --$leave_socket_open_passes <= 0 )
-        or ( $leave_socket_open_check and eval($leave_socket_open_check) ) )
-    {
-        my $sock = $Socket_Ports{http}{socka};
-        print "http: closing http port with action: s=$sock a=$leave_socket_open_action\n"
-          if $Debug{http};
-        my @data = eval($leave_socket_open_action);
-        print "Error in http lso action: $@\n" if $@;
-        my $html = &html_page( "", @data );
-        print $sock $html if $sock;
-        &socket_close('http');
-        $leave_socket_open_passes = 0;
-        $leave_socket_open_action = '';
-        $leave_socket_open_check  = '';
-    }
 
-    #   return if $leave_socket_open_passes; # Wait for previous request to finish
-    return if $leave_socket_open_action;    # Wait for previous request to finish
+	my $http_socket = $Socket_Ports{http}{Socket_Item};
+        if ( ( $http_socket ) && ( my $http_data = $http_socket->said('http_server') ) ) {
+           ( $leave_socket_open_passes, $Close_Socket ) = &http_process_request($Socket_Ports{http}{socka},$http_data);
+	    if ( $main::Debug{http} ) {
+               my $peer = $Socket_Ports{http}{socka}->peername;
+               my ( $port, $iaddr ) = &main::unpack_sockaddr_in($peer) if $peer;
+               my $client_ip_address = &main::inet_ntoa($iaddr) if $iaddr;
+               print "http: Got data lsop=$leave_socket_open_passes cs=$Close_Socket ip=$client_ip_address p=$port\n";
+             }
+          }
+	 # We only close sockets for legacy http 1.0 clients or if we see the "Connection: close" header - "$Close_Socket"
+         if ( $Close_Socket && $Socket_Ports{http}{socka} && !($leave_socket_open_passes eq -1) ) {
+            if ( $main::Debug{http} ) {
+               my $peer = $Socket_Ports{http}{socka}->peername;
+               my ( $port, $iaddr ) = &main::unpack_sockaddr_in($peer) if $peer;
+               my $client_ip_address = &main::inet_ntoa($iaddr) if $iaddr;
+               print "http: Closing socket cs=$Close_Socket lsop=$leave_socket_open_passes ip=$client_ip_address p=$port\n";
+             }
+             &socket_close('http');
+         }
 
-    my $loop_count = 0;
-    my $time_check = time;
-    while (1) {
-
-        # See if there is a http request
-        my $nfound = &socket_has_data( $Socket_Ports{http}{sock} );
-        last unless $nfound > 0;            # nfound = -1 means an error occurred
-        my $sock = $Socket_Ports{http}{sock}->accept();
-        last unless $sock;                  # Can be undef it socket was killed
-        $sock->autoflush(1);                # Not sure if this does anything?
-        $Socket_Ports{http}{socka} = $sock;
-
-        ( $leave_socket_open_passes, $leave_socket_open_action ) = &http_process_request($sock);
-
-        my $time_diff = time - $time_check;
-        print "http: c=$loop_count td=$time_diff sop=$leave_socket_open_passes soa=$leave_socket_open_action.\n"
-          if $Debug{http};
-
-        if ($leave_socket_open_action) {
-            last;                           # Wait for socket action to finish before we process the next request
-        }
-        else {
-            # forked socket needs no closing, and can not have a open_action
-            if ( $leave_socket_open_passes and $leave_socket_open_passes < 0 ) {
-                $leave_socket_open_passes = 0;
-            }
-            else {
-                # We must sleep here for a bit, or else Netscape sometimes
-                # says 'Document contains no data'.  Guess we don't need this anymore :)
-                #               select undef, undef, undef, .010;
-                &socket_close('http');
-            }
-        }
-
-        # Process more requests if present, for a faster server,
-        # but let mh do other things periodically
-        #      last if $loop_count++ > 100;
-        last if $loop_count++ > 100 or $time_diff > 1;
-    }
 }
+
+
 
 sub check_for_socket_data {
 
@@ -2588,7 +2568,6 @@ sub check_for_socket_data {
     # See which ports are active
     #  - could probably use a smarter select check here, rather than loop for each port
     for my $port_name ( keys %Socket_Ports ) {
-        next if $port_name eq 'http';    # Deal with this elsewhere
                                          # Need to use _flag var so active/inactive_this_pass is valid for 1 full pass.
         $Socket_Ports{$port_name}{active_this_pass} = 0;
         $Socket_Ports{$port_name}{active_this_pass} = 1
@@ -2616,7 +2595,7 @@ sub check_for_socket_data {
                     $Socket_Ports{$port_name}{client_ip_address} = $client_ip_address;
                     $Socket_Ports{$port_name}{client_port}       = $client_port;
                     print "socket: $port_name nfound=$nfound client=$client_number"
-                      if $Debug{$port_name};
+                      if $Debug{$port_name} && $Debug{'socket'};
                     $server_active = 1;
                     last;
                 }
@@ -2656,7 +2635,7 @@ sub check_for_socket_data {
                       "$config_parms{data_dir}/logs/server.$Year_Month_Now.log",
                       "$port_name $client_ip_address";
                     print "\nsocket: $port_name active sock=$new_sock client=$client_ip_address.\n"
-                      if $Debug{$port_name};
+                      if $Debug{$port_name} && $Debug{'socket'};
 
                     $server_active = 1;
                 }
@@ -2710,8 +2689,14 @@ sub check_for_socket_data {
             $data = <$sock>;
         }
         else {
-            # 1500 is ethernet packet size
-            my $from_saddr = recv( $sock, $data, 1500, 0 );
+            # We used to read 1500 bytes here because that is the default
+	    # MTU for Ethernet. However, larger MTUs can be in use. In fact,
+	    # the MTU of the loopback interface is set in a modern Linux
+	    # distribution at 65535 bytes. Reading only 1500 can break
+	    # things when the traffic comes to the MisterHouse HTTP server
+	    # via the loopback interface and in packets larger than 1500
+	    # bytes.
+            my $from_saddr = recv( $sock, $data, 65535, 0 );
 
             # Store udp from_* data
             if (    $Socket_Ports{$port_name}{protocol}
@@ -2733,12 +2718,12 @@ sub check_for_socket_data {
         # When telnet closes, byte IS defined, but is empty, so check on ''
         if ( !defined $data or $data eq '' ) {
             print "socket: closing socket port $port_name\n"
-              if $Debug{$port_name};
+              if $Debug{$port_name} && $Debug{'socket'};
             &socket_close($port_name);
         }
         else {
             $Socket_Ports{$port_name}{data} .= $data if defined $data;
-            print "socket: port=$port_name data=$data.\n" if $Debug{$port_name};
+            print "socket: port=$port_name data=".$Socket_Ports{$port_name}{data}."\n" if $Debug{$port_name};
 
             if ( my $echo = $config_parms{"${port_name}_echo"} ) {
 
@@ -2759,7 +2744,6 @@ sub check_for_socket_data {
     # Look for 'records' based on break separator
     #  - this data may have been read from a previous pass
     for my $port_name ( keys %Socket_Ports ) {
-        next if $port_name eq 'http';    # Deal with this elsewhere
         next unless $Socket_Ports{$port_name}{data};
 
         # If raw mode, return data as is
@@ -2780,7 +2764,7 @@ sub check_for_socket_data {
         if ( my ( $record, $remainder ) = $Socket_Ports{$port_name}{data} =~ /(.+?)$break(.*)/s ) {
             $Socket_Ports{$port_name}{data_record} = $record;
             $Socket_Ports{$port_name}{data}        = $remainder;
-            if ( $Debug{$port_name} ) {
+            if ( $Debug{$port_name} && $Debug{'socket'} ) {
                 print "socket: port=$port_name record=$record, r=$remainder.\n";
 
                 #               print "socket: $port_name record=$record.  hex=", unpack('H*', $record), "\n";
@@ -4720,7 +4704,7 @@ sub print_speaklog_current_time {
     # Return the time of most recent speak phrase
 
     #print "db/mh/curr: time=" . &get_tickcount . " plt=$Print_Log_Time[0] slt=$Speak_Log_Time[0]\n";
-    return $Print_Log_Time[0]
+    return $Speak_Log_Time[0]
       unless ( scalar @Speak_Log_Time <= 0 );    #TODO HP should return $Speak_Log_Time
                                                  #return $Speak_Log_Time[0] unless (scalar @Speak_Log_Time <= 0); #TODO HP should return $Speak_Log_Time
     return 0;
@@ -6683,15 +6667,28 @@ sub sig_handler_pipe {
 }
 
 sub sig_child_death {
+    use POSIX ":sys_wait_h";
+    local ($!, $?);
+    while ( (my $pid = waitpid(-1, WNOHANG)) > 0 ) {
+       &print_log( "***PID reaped $pid" . ($? ? " with exit $?" : '') ) if $::Debug{fork};
+   }
+ $SIG{CHLD} = \&sig_child_death;          # in case of unreliable signals
+}
 
-    #   my $pid = wait;
-    #   print "reaped $pid" . ($? ? " with exit $?" : '');
+sub sig_child_death2 {
+     # print "reaped $pid" . ($? ? " with exit $?" : '');
     # Harvest potentially more than one dead child
     use POSIX ":sys_wait_h";
+    local ($!, $?);
+
     my $pid;
     do {
         $pid = waitpid( -1, WNOHANG );
+        print "***PID MH reaped $pid" . ($? ? " with exit $?" : '') . "\n" if $Debug{fork};
+
     } until $pid <= 0;
+
+    $SIG{CHLD} = \&sig_child_death;
 
     #       $pid = waitpid(-1, &WNOHANG);
     #   } until $pid == -1;
@@ -6701,7 +6698,12 @@ sub sig_child_death {
 sub socket_close {
     my ($port_name) = @_;
     my $sock = $Socket_Ports{$port_name}{socka};
-    print "Closing socket port $port_name\n" if $Debug{$port_name};
+    if ( $main::Debug{$port_name} ) {
+       my $peer = $sock->peername;
+       my ( $port, $iaddr ) = &main::unpack_sockaddr_in($peer) if $peer;
+       my $client_ip_address = &main::inet_ntoa($iaddr) if $iaddr;
+       print "Closing socket port=$port_name ip=$client_ip_address p=$port\n"
+    }
     unless ($sock) {
         print "Error, socket_close sock port undefined for port $port_name\n";
     }
@@ -6803,9 +6805,8 @@ sub socket_has_data {
     my $loopmax = 8;
     do {
         ($nfound) = select( $rbit, undef, undef, $timeout );
-        last
-          if $nfound == -1
-          and !( $!{EINTR} );                # break out of the retry loop if an error did occur but not EINTR
+	#&::print_log("http: in socket_has_data do loop");
+        last if $nfound == -1 and !( $!{EINTR} );          # break out of the retry loop if an error did occur but not EINTR
         $loopmax--;
     } until ( $loopmax == 0 or ( $nfound >= 0 ) );
 
@@ -7122,11 +7123,24 @@ sub speak {
 
         # Intercept speak/log/print/last_response -> web wav
         #  - but not for wml response
+
+	# I can't find anything that uses this from http_server, but if it does then
+	# we will need to pass the $client_number, $requestnum to it and send it to
+	# html_ajax_long_poll.
         if (    $leave_socket_open_action =~ /response/
             and $leave_socket_open_action !~ /,'w'/ )
         {
             # Generate to_wave file unless webmute
             if ( my $wav_file = &http_speak_to_wav_start( $phrase, $parms{voice}, $parms{compression} ) ) {
+		# I can't find anything that uses this from http_server, but if it does then
+        	# we will need to pass the $client_number, $requestnum to it and send it to
+        	# html_ajax_long_poll as commented below.
+		#my $socket = $Socket_Ports{http}{socka};
+		#my $sub = "html_page( \"\", (&main::http_speak_to_wav_finish(qq|$phrase|, qq|$wav_file|)) ) unless &Voice_Text::is_speaking_wav()\;";
+                #$leave_socket_open_action = undef;
+                #$leave_socket_open_check  = undef;
+                #$leave_socket_open_passes = -1;
+		#&html_ajax_long_poll( $socket, undef, $sub, $client_number, $requestnum, 3);
                 $leave_socket_open_action = "&http_speak_to_wav_finish(qq|$phrase|, qq|$wav_file|)";
                 $leave_socket_open_check  = "!&Voice_Text::is_speaking_wav()";
                 $leave_socket_open_passes = 999;
@@ -7746,6 +7760,18 @@ sub x10_dim_level_decode {
 sub log_inc {
     print_log( 'Perl @INC contains: ' . join( ", ", @INC ) );
 }
+
+sub set_waiter_flags {
+    my ($flag,$value) = @_; 
+    $waiter_flags{$flag} = $value;
+}
+
+sub get_waiter_flags {
+   my ($flag) = @_;
+   $waiter_flags{$flag} = 0 unless (exists $waiter_flags{$flag});
+   return $waiter_flags{$flag};
+}
+
 
 #---------------------------------------------------------------------------
 
