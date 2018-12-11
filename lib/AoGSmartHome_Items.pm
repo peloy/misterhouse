@@ -465,7 +465,7 @@ EOF
     "name": {
      "name": "$self->{'uuids'}->{$uuid}->{'name'}"
     },
-    "willReportState": false,
+    "willReportState": true,
 EOF
 
 	    if (exists $self->{'uuids'}->{$uuid}->{'room'}) {
@@ -499,7 +499,7 @@ EOF
     "name": {
      "name": "$self->{'uuids'}->{$uuid}->{'name'}"
     },
-    "willReportState": false,
+    "willReportState": true,
 EOF
 
 	    if (exists $self->{'uuids'}->{$uuid}->{'room'}) {
