@@ -137,10 +137,10 @@ sub process_http_aog {
     }
 
     if ( $uri eq $::config_parms{'aog_auth_path'} ) {
-        print "[AoGSmartHome] Debug: Processing OAuth request.\n" if $main::Debug{'aog'};
+        print STDERR "[AoGSmartHome] Debug: Processing OAuth request.\n" if $main::Debug{'aog'};
 
         if ( $request_type eq 'POST' ) {
-            print "[AoGSmartHome] Debug: Processing HTTP POST.\n" if $main::Debug{'aog'};
+            print STDERR "[AoGSmartHome] Debug: Processing HTTP POST.\n" if $main::Debug{'aog'};
 
             if ( !exists $HTTP_ARGV{'password'} ) {
                 &main::print_log("[AoGSmartHome] missing 'password' argument in HTTP POST");
@@ -222,7 +222,7 @@ EOF
 
         foreach my $t ( keys %{$oauth_tokens} ) {
             if ( $oauth_tokens->{$t} eq $Authorized ) {
-                print "[AoGSmartHome] Debug: found token '$t' for user '$Authorized'\n"
+                print STDERR "[AoGSmartHome] Debug: found token '$t' for user '$Authorized'\n"
                   if $main::Debug{'aog'};
                 $token = $t;
                 last;
@@ -242,7 +242,7 @@ EOF
                 }
             }
 
-            print "[AoGSmartHome] Debug: token for user '$Authorized' did not exist; generated token '$token'\n"
+            print STDERR "[AoGSmartHome] Debug: token for user '$Authorized' did not exist; generated token '$token'\n"
               if $main::Debug{'aog'};
 
             store $oauth_tokens, $::config_parms{'aog_oauth_tokens_file'};
@@ -251,7 +251,7 @@ EOF
         return http_redirect("$HTTP_ARGV{'redirect_uri'}#access_token=$token&token_type=bearer&state=$HTTP_ARGV{'state'}");
     }
     elsif ( $uri eq $::config_parms{'aog_fulfillment_url'} ) {
-        print "[AoGSmartHome] Debug: Processing fulfillment request.\n" if $main::Debug{'aog'};
+        print STDERR "[AoGSmartHome] Debug: Processing fulfillment request.\n" if $main::Debug{'aog'};
 
         if ( !$Http{Authorization} || $Http{Authorization} !~ /Bearer (\S+)/ ) {
             return http_error("401 Unauthorized");
@@ -260,13 +260,13 @@ EOF
         my $received_token = $1;
 
         if ( exists $oauth_tokens->{$received_token} ) {
-            print "[AoGSmartHome] Debug: fulfillment request has correct token '$received_token' for user '$oauth_tokens->{$received_token}'\n"
+            print STDERR "[AoGSmartHome] Debug: fulfillment request has correct token '$received_token' for user '$oauth_tokens->{$received_token}'\n"
               if $main::Debug{'aog'};
         }
         else {
             &main::print_log("[AoGSmartHome] Incorrect token '$received_token' in fulfillment request!");
 
-            print "[AoGSmartHome] Debug: Incorrect token '$received_token' in fulfillment request!\n"
+            print STDERR "[AoGSmartHome] Debug: Incorrect token '$received_token' in fulfillment request!\n"
               if $main::Debug{'aog'};
 
             return http_error("401 Unauthorized");
@@ -292,6 +292,15 @@ EOF
         elsif ( $body->{'inputs'}->[0]->{'intent'} eq 'action.devices.EXECUTE' ) {
             return $aog_items->execute($body);
         }
+        elsif ( $body->{'inputs'}->[0]->{'intent'} eq 'action.devices.DISCONNECT' ) {
+            &main::print_log("[AoGSmartHome] action.devices.DISCONNECT received!");
+
+            print STDERR "[AoGSmartHome] Debug: action.devices.DISCONNECT received!\n"
+              if $main::Debug{'aog'};
+
+	    # 200 Ok with an empty JSON body is all that is needed
+	    return &main::json_page("{}");
+	}
         else {
             # Bad boy
             return http_error("400 Bad Request");
