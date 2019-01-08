@@ -68,32 +68,30 @@ good with the defaults, you can add an object like:
 
  $AoGSmartHomeItems->add('$light1');         
 
-<name you want Echo/GH to see> - This defaults to using the <actual
-object name> without the $. If want to change the name you say to the
-Echo/GH to control the object, you can define it here. You can also make
-aliases for objects so it's easier to remember.
+<name you want Google Assistant> - This defaults to using the <actual object
+name> without the $. If want to change the name you say to the Google Assistant
+to control the object, you can define it here. You can also make aliases for
+objects so it's easier to remember.
 
 <sub used to change the object state> - This defaults to 'set' which
 works for most objects. You can also put a code reference or
 'run_voice_cmd'.
 
-<State mapped to Echo/GH on command> - If you want to set an object to
-something other than 'on' when you say 'on' to the Echo/GH, you can define
-it here. Defaults to 'on'.
+<State mapped to Google Assistant on command> - If you want to set an object to
+something other than 'on' when you say 'on' to the Google Assistant, you can
+define it here. Defaults to 'on'.
 
-<State mapped to Echo/GH OFF command> - If you want to set an object to
-something other than 'off' when you say 'off' to the Echo/GH, you can
-define it here. Defaults to 'off'.
+<State mapped to Google Assistant OFF command> - If you want to set an object
+to something other than 'off' when you say 'off' to the Google Assistant, you
+can define it here. Defaults to 'off'.
 
 <sub used to get the object state> - If your object uses a custom sub to
 get the state, define it here. Defaults to 'state' which works for most
 objects.
 
 
-The dim % is the actual number you say to Alexa, so if you say "Alexa,Set
-Light 1 to 75 %" then the dim % value will be 75.
-
-The module supports 300 devices which is the max supported by the Echo 
+The dim % is the actual number you say to the Google Assistant, so if you say
+"Okay Google, set Light 1 to 75 %" then the dim % value will be 75.
 
 =head2 Complete Examples
 
@@ -112,16 +110,18 @@ User code examples:
  $AoGSmartHomeItems = new AoGSmartHome_Items();
  $AoGSmartHomeItems->add('$light1','light1','set','on','off','state');  # This is the same as $AoGSmartHomeItems->add('$light1')
 
-To change the name of an object to a more natural name that you would say to the Echo/GH:
+To change the name of an object to a more natural name that you would say to
+the Google Assistant:
 
  $AoGSmartHomeItems->add('$GarageHall_light_front','Garage_Hall_light');
 
-To map a voice command, '!' is replaced by the Echo/GH command (on/off/dim%).
-My actual voice command in MH is "set night mode on", so I configure it like:
+To map a voice command, '!' is replaced by the Google Assistant command
+(on/off/dim%).  My actual voice command in MH is "set night mode on", so I
+configure it like:
 
  $AoGSmartHomeItems->add('set night mode !','NightMode','run_voice_cmd');   
 
- If I say "Alexa, Turn on Night Mode",  run_voice_cmd("set night mode on") is run in MH.
+ If I say "Okay Google, turn on Night Mode",  run_voice_cmd("set night mode on") is run in MH.
 
 To configure a user code sub:
 The actual name (argument 1) can be anything.
@@ -134,19 +134,21 @@ When the sub is run 2 arguments are passed to it: Argument 1 is (state or set) A
 
 # User Code
 
- $AoGSmartHomeItems->add('testsub','Test_Sub',\&testsub);  # say "Alexa, Turn on Test Sub",  &testsub('set','on') is run in MH.
+ $AoGSmartHomeItems->add('testsub','Test_Sub',\&testsub);  # say "Okay Google, turn on Test Sub",  &testsub('set','on') is run in MH.
 
 
 # I have an Insteon thermostat, the Insteon object name is $thermostat and I configured it like:
 
  AOGSMARTHOME_ITEM, AoGSmartHomeItems, thermostat, Heat, heat_setpoint, on, off, get_heat_sp
 
-# say "Alexa, Set Heat to 73",  $thermostat->heat_setpoint("73") is run in MH.
+# say "Okay Google, set heat to 73",  $thermostat->heat_setpoint("73") is run in MH.
 
  AOGSMARTHOME_ITEM, AoGSmartHomeItems, thermostat, Cool, cool_setpoint, on, off, get_cool_sp
 
-In order to be able to say things like "Alexa, set thermostat up by 2", a sub must be created in user code
-When the above is said to the Echo, it first gets the current state, then subtracts or adds the amount that was said. 
+In order to be able to say things like "Okay Google, set thermostat up by 2", a
+sub must be created in user code.  When the above is said to the Google
+Assistant, it first gets the current state, then subtracts or adds the amount
+that was said. 
 
  sub temperature {
    my ($type, $state) = @_;
@@ -155,7 +157,7 @@ When the above is said to the Echo, it first gets the current state, then subtra
    # $state is the number, on, off, etc
 
    # we are changing heat and cool so just return a static number, we just need the diff
-   # because the Echo will add or subtact the amount that was said to it.
+   # because the Google Assistant will add or subtact the amount that was said to it.
    # so if we say "set thermostat up by 2", 52 will be returned in $state   
    if ($type eq 'state') { return 50; }
 
@@ -172,7 +174,8 @@ When the above is said to the Echo, it first gets the current state, then subtra
    set $alexa_temp_timer '7', sub { $thermostat->heat_setpoint($heatsp) }
  }
 
-# Map our new temperature sub in the .mht file so the Echo/Google Home can discover it 
+# Map our new temperature sub in the .mht file so the Google Assistant can
+# discover it 
 
  AOGSMARTHOME_ITEM, AoGSmartHomeItems, thermostat, thermostat, &temperature
 
@@ -220,7 +223,6 @@ sub set_state {
     my $name     = $self->{'uuids'}->{$uuid}->{'name'};
     my $realname = $self->{'uuids'}->{$uuid}->{'realname'};
     my $sub      = $self->{'uuids'}->{$uuid}->{'sub'};
-    my $statesub = $self->{'uuids'}->{$uuid}->{'statesub'};
 
     # ???
     $state = $self->{'uuids'}->{$uuid}->{ lc($state) } if $self->{'uuids'}->{$uuid}->{ lc($state) };
@@ -345,6 +347,15 @@ sub new {
     return $self;
 }
 
+my @valid_types = (
+    "light",
+    "scene",
+    "switch",
+    "outlet",
+    "thermostat",
+    "camera"
+);
+
 =item C<add()>
 
 Presents MisterHouse objects, subs, or voice coommands to the Actions on
@@ -382,9 +393,13 @@ sub add {
 		$type = $value;
 
 		# Check that the type is a supported one
-		if ($type ne 'light' && $type ne 'scene' && $type ne 'switch'
-		    && $type ne 'outlet'&& $type ne 'thermostat') {
+		if (!grep($type eq $_, @valid_types) ) {
 		    &main::print_log("[AoGSmartHome] Invalid device type '$type'; ignoring AoG item.");
+		    return;
+		}
+
+		if ($type eq "camera" && (!defined $statesub || $statesub !~ m%^https?://%) ) {
+		    &main::print_log("[AoGSmartHome] \"camera\" device \"$realname\" requires streaming URL (\"http://xxxx\" or \"https://xxxx\") in statesub field; ignoring AoG item.");
 		    return;
 		}
 	    } elsif ($parm eq 'room') {
@@ -564,6 +579,26 @@ EOF
     "willReportState": false,
     "attributes": {
      "sceneReversible": false
+    }
+   },
+EOF
+	}
+        elsif ( $type eq 'camera' ) {
+            $response .= <<EOF;
+   {
+    "id": "$uuid",
+    "type": "action.devices.types.CAMERA",
+    "traits": [
+     "action.devices.traits.CameraStream"
+    ],
+    "name": {
+     "name": "$self->{'uuids'}->{$uuid}->{'name'}"
+    },
+    "willReportState": false,
+    "attributes": {
+     "cameraStreamSupportedProtocols": ["hls"],
+     "cameraStreamNeedAuthToken": false,
+     "cameraStreamNeedDrmEncryption": false
     }
    },
 EOF
@@ -799,7 +834,7 @@ EOF
 }
 
 sub execute_ThermostatX {
-    my ( $self, $command, $exec_command ) = @_;
+    my ( $self, $command ) = @_;
 
     my $response;
 
@@ -857,6 +892,36 @@ EOF
     return $response;
 }
 
+sub execute_GetCameraStream {
+    my ( $self, $command ) = @_;
+
+    my $response = '   {
+    "ids": [';
+
+    # No looping over @{ $command->{'devices'} } -- I don't believe we would
+    # ever receive more than one device ID when the device is a camera.
+    my $device = @{ $command->{'devices'} }[0];
+
+    $response .= qq["$device->{'id'}",];
+
+    # Remove extra ',' at the end
+    $response =~ s/,$//;
+
+    $response .= "],\n";
+
+    my $url = $self->{'uuids'}->{$device->{'id'} }->{'statesub'};
+
+    $response .= <<EOF;
+    "status": "SUCCESS",
+    "states": {
+     "cameraStreamAccessUrl": "$url"
+    }
+   },
+EOF
+
+    return $response;
+}
+
 =item C<execute()>
 
 Generates an action.devices.EXECUTE fulfillment response.
@@ -897,6 +962,9 @@ EOF
         }
         elsif ( $execution_command =~ /^action\.devices\.commands\.Thermostat.+$/ ) {
 	    $response .= execute_ThermostatX( $self, $command );
+        }
+        elsif ( $execution_command eq "action.devices.commands.GetCameraStream" ) {
+	    $response .= execute_GetCameraStream( $self, $command );
 	}
     }
 
