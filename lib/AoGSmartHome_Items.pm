@@ -686,6 +686,16 @@ EOF
 
 	    next;
 	}
+	# Don't know why we would get queried on the state of a camera,
+	# but it seems like it started happening in November 2020.
+        if ( $self->{'uuids'}->{$uuid}->{'type'} eq 'camera' ) {
+            $response .= <<EOF;
+   "$uuid": {
+    "online": true
+   },
+EOF
+            next;
+        }
 
         #
         # The device is a light, a switch, or an outlet.
@@ -732,7 +742,16 @@ EOF
 	    $response .= <<EOF;
     "brightness": $devstate,
 EOF
-	}
+	    	}
+	    #	} else {
+	    #my $brightness;
+	    #my $on = $devstate eq "on" || $devstate > 0 ? 'true' : 'false';
+	    #$brightness = $on eq 'true' ? 100 : 0;
+
+	    #$response .= <<EOF;
+	    #    "brightness": $brightness,
+	    #EOF
+	    #}
 
         $response .= <<EOF;
     "online": true
@@ -914,7 +933,8 @@ sub execute_GetCameraStream {
     $response .= <<EOF;
     "status": "SUCCESS",
     "states": {
-     "cameraStreamAccessUrl": "$url"
+     "cameraStreamAccessUrl": "$url",
+     "cameraStreamSupportedProtocols": ["hls"]
     }
    },
 EOF
