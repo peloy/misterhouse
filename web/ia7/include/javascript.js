@@ -1,5 +1,5 @@
 
-var ia7_ver = "v2.0.810";
+var ia7_ver = "v2.3.100";
 var coll_ver = "";
 var entity_store = {}; //global storage of entities
 var json_store = {};
@@ -1050,7 +1050,7 @@ var loadList = function() {
 	var button_text = '';
 	var button_html = '';
 	var entity_arr = [];
-	URLHash.fields = "category,label,sort_order,members,state,states,state_log,hidden,type,text,schedule,logger_status,link,rgb";
+	URLHash.fields = "category,label,sort_order,members,state,states,state_log,hidden,type,text,schedule,logger_status,state_override,link,rgb,rrd";
 	$.ajax({
 		type: "GET",
 		url: "/json/"+HashtoJSONArgs(URLHash),
@@ -1154,9 +1154,10 @@ var loadList = function() {
 				}
 				else {
 					// These are controllable MH objects
-					json_store.objects[entity] = json_store.objects[entity];
+//					json_store.objects[entity] = json_store.objects[entity];
+					var state = getState(json_store.objects[entity].state);
 					var name = entity;
-					var color = getButtonColor(json_store.objects[entity].state);
+					var color = getButtonColor(state);
 					if (json_store.objects[entity].label !== undefined) name = json_store.objects[entity].label;
 					//Put objects into button
 					var dbl_btn = "";
@@ -1174,10 +1175,15 @@ var loadList = function() {
                 		if (json_store.ia7_config.objects[entity].direct_control !== undefined && json_store.ia7_config.objects[entity].direct_control == "yes") {
                             btn_direct = "btn-direct";
                 		}
-                	} 
+                	} else {  // RF Global fallback - only multistate items
+                      if (json_store.ia7_config.prefs.direct_control == "yes" && json_store.objects[entity].states.length > 1)  {
+                        btn_direct = "btn-direct";
+                      }
+                    }
+                    
 					button_html = "<div style='vertical-align:middle'><button entity='"+entity+"' ";
 					button_html += "class='btn btn-"+color+" btn-lg btn-block btn-list btn-popover "+btn_direct+" btn-state-cmd navbutton-padding'>";
-					button_html += name+btn_rgb+dbl_btn+"<span class='pull-right object-state'>"+json_store.objects[entity].state+"</span></button></div>";
+					button_html += name+btn_rgb+dbl_btn+"<span class='pull-right object-state'>"+state+"</span></button></div>";
 					entity_arr.push(button_html);
 				}
 			}//entity each loop
@@ -1239,8 +1245,12 @@ var loadList = function() {
                 	} else {
                 		create_state_modal(entity);
                 	}
-				} else {				
-					create_state_modal(entity);
+				} else {	//Use Global fallback for those that prefer direct_control
+				    if (json_store.ia7_config.prefs.direct_control == "yes" && json_store.objects[entity].states.length > 1) {
+                        direct_control(entity);
+                    } else {			
+					    create_state_modal(entity);
+					}
 				}
 			});
 			$(".btn-state-cmd").mayTriggerLongClicks().on( 'longClick', function() {		
@@ -1260,13 +1270,17 @@ var loadList = function() {
 var generateTooltips = function () {
     if ((show_tooltips) && (mobile_device() == "no") ){ //no sense in having tooltips on a touch device
 	    $(".btn").each(function( index ) {
+	    	//console.log($(this).text()+' 	>0 1='+$(this)[0].scrollWidth+' > 2='+$(this).outerWidth());
 	        if ($(this)[0].scrollWidth > 0) {
 	            //if scrollWidth is greater than outerWidth then bootstrap has truncated the button text
 		        if ($(this)[0].scrollWidth > $(this).outerWidth()) {
                     $(this).attr('data-toggle', 'tooltip');
                     $(this).attr('data-placement', 'auto bottom');
-                    $(this).attr('data-original-title', $(this).text());
-                    $(this).attr('title', $(this).text());
+                    var lngth = $(this).find('.object-state').text().length;
+                    var txt = $(this).text().slice(0,(-1 * lngth));
+                    //console.log("text="+$(this).text()+' objectstate='+$(this).find('.object-state').text()+' txt='+txt+' length='+lngth);
+                    $(this).attr('data-original-title', txt);
+                    $(this).attr('title', txt);
                 } else {
                     $(this).attr('data-original-title', '');
                     $(this).attr('title', '');                
@@ -1277,18 +1291,28 @@ var generateTooltips = function () {
     }	
 }
 
+//RF TODO Maybe reflect lighting levels as numbers, temp colours / brightness too ?
 var getButtonColor = function (state) {
 	var color = "default";
-	if (state !== undefined) state = state.toLowerCase();
-	if (state == "on" || state == "open" || state == "disarmed" || state == "unarmed" || state == "ready" || state == "dry" || state == "up" || state == "100%" || state == "online" || state == "unlocked") {
+	if (state !== undefined) {
+	    state = state.toString().toLowerCase();
+	} else {
+	    return "purple";
+	}
+	if (state == "uninitialized") {
+	    return "purple";
+	}
+	if (state == "undefined" || state == "unknown") {
+		return "undef";
+	}
+	
+      if (state.match (/^(on|open|(dis|un)armed|ready|dry|up|100|online|unlocked|play|occupied|start)/) ) {
 		 color = "success";
-	} else if (state == "motion" || state == "armed" || state == "wet" || state == "fault" || state == "down" || state == "offline" || state == "locked") {
+      } else if (state.match (/^(motion|armed|wet|fault|down|offline|lock|error|stop)/) ) {
 		 color = "danger";
-	} else if (state == undefined || state == "unknown" ) {
-		 color = "purple";
-	} else if (state == "low" || state == "med" || state.indexOf('%') >= 0 || state == "light" || state == "heating" || state == "heat") { 
+      } else if (state.match(/^(low|med|^[1-9]+[0-9]*%$|light|heat|pause|setback)/) ) { 
 		 color = "warning";
-	} else if (state == "cooling" || state == "cool") {
+      } else if (state.match (/^(cool|unoccupied)/) ) {
 		 color = "info";
 	}
 	if (json_store.ia7_config !== undefined && json_store.ia7_config.state_colors !== undefined
@@ -1308,6 +1332,16 @@ var getButtonColor = function (state) {
 	}
 	return color;
 };
+
+var getState = function (state) {
+	var nstate = state;
+	if (nstate == "") {
+	  nstate = "undefined"
+	} else if (nstate == undefined) {
+	  nstate = "uninitialized"
+	}
+	return nstate;
+}
 
 var filterSubstate = function (state, slider) {
  	// ideally the gear icon on the set page will remove the filter
@@ -1416,7 +1450,7 @@ var sortArrayByArray = function (listArray, sortArray){
 //Used to dynamically update the state of objects
 var updateList = function(path) {
 	var URLHash = URLToHash();
-	URLHash.fields = "state,state_log,schedule,logger_status,type,rgb";
+	URLHash.fields = "state,state_log,schedule,logger_status,state_override,type,rgb,rrd";
 	URLHash.long_poll = 'true';
 	URLHash.time = json_store.meta.time;
 	if (updateSocket !== undefined && updateSocket.readyState != 4){
@@ -1440,19 +1474,18 @@ var updateList = function(path) {
 					if (json.data[entity].type === undefined) continue;
                     if ($('button[entity="'+entity+'"]').hasClass('btn-voice-cmd')) continue; //don't change color for voice commands
 					var color;
-					if (json.data[entity].state === undefined) {
-					    color = "default";
-					} else {
-					    color = getButtonColor(json.data[entity].state);
-					}
+					var state; 
+					state = getState(json.data[entity].state);
+					color = getButtonColor(state);
 					var btn_rgb = "";
 					if (json.data[entity].rgb !== undefined) {
 						$('button[entity="'+entity+'"]').find('.object-color').css("color",'rgb('+json.data[entity].rgb+')');
 					}
-					$('button[entity="'+entity+'"]').find('.object-state').text(json.data[entity].state);
+					$('button[entity="'+entity+'"]').find('.object-state').text(state);
 					$('button[entity="'+entity+'"]').removeClass("btn-default");
 					$('button[entity="'+entity+'"]').removeClass("btn-success");
 					$('button[entity="'+entity+'"]').removeClass("btn-purple");
+					$('button[entity="'+entity+'"]').removeClass("btn-undef");					
 					$('button[entity="'+entity+'"]').removeClass("btn-warning");
 					$('button[entity="'+entity+'"]').removeClass("btn-danger");
 					$('button[entity="'+entity+'"]').removeClass("btn-info");
@@ -1491,7 +1524,7 @@ var updateItem = function(item,link,time) {
 		time = "";
 	}
 	var path_str = "/objects"  // override, for now, would be good to add voice_cmds
-	var arg_str = "fields=state,states,label,state_log,schedule,logger_status,rgb&long_poll=true&items="+item+"&time="+time;
+	var arg_str = "fields=state,states,label,state_log,schedule,logger_status,state_override,rgb,rrd&long_poll=true&items="+item+"&time="+time;
 	$.ajax({
 		type: "GET",
 		url: "/LONG_POLL?json('GET','"+path_str+"','"+arg_str+"')",		
@@ -1502,10 +1535,12 @@ var updateItem = function(item,link,time) {
 				ajax_req_success("update_item");			
 				JSONStore(json);
 				requestTime = json_store.meta.time;
-				var color = getButtonColor(json.data[item].state);
-				$('button[entity="'+item+'"]').find('.object-state').text(json.data[item].state);
+				var state = getState(json.data[item].state)
+				var color = getButtonColor(state);
+				$('button[entity="'+item+'"]').find('.object-state').text(state);
 				$('button[entity="'+item+'"]').removeClass("btn-default");
 				$('button[entity="'+item+'"]').removeClass("btn-purple");
+				$('button[entity="'+item+'"]').removeClass("btn-undef");
 				$('button[entity="'+item+'"]').removeClass("btn-success");
 				$('button[entity="'+item+'"]').removeClass("btn-warning");
 				$('button[entity="'+item+'"]').removeClass("btn-danger");
@@ -1544,7 +1579,7 @@ var updateStaticPage = function(link,time) {
    		 }
    	})
 	var URLHash = URLToHash();
-	URLHash.fields = "state,states,state_log,schedule,logger_status,label,type";
+	URLHash.fields = "state,states,state_log,schedule,logger_status,state_override,label,type,rgb,rrd";
 	URLHash.long_poll = 'true';
 	URLHash.time = json_store.meta.time;
 	if (updateSocket !== undefined && updateSocket.readyState != 4){
@@ -1553,7 +1588,7 @@ var updateStaticPage = function(link,time) {
 	}
 
 	var path_str = "/objects"  // override, for now, would be good to add voice_cmds
-	var arg_str = "fields=state%2Cstates%2Cstate_log%2Cschedule%2Clogger_status%2Clabel&long_poll=true&items="+items+"&time="+time;
+	var arg_str = "fields=state%2Cstates%2Cstate_log%2Cschedule%2Clogger_status%2Cstate_override%2Clabel&long_poll=true&items="+items+"&time="+time;
 
 	updateSocket = $.ajax({
 		type: "GET",
@@ -1568,11 +1603,13 @@ var updateStaticPage = function(link,time) {
 				$('button[entity]').each(function(index) {
 					if ($(this).attr('entity') != '' && json.data[$(this).attr('entity')] != undefined ) { //need an entity item for this to work.
 						entity = $(this).attr('entity');
-						var color = getButtonColor(json.data[entity].state);
-						$('button[entity="'+entity+'"]').find('.object-state').text(json.data[entity].state);
+						var state = getState(json.data[entity].state);
+						var color = getButtonColor(state);
+						$('button[entity="'+entity+'"]').find('.object-state').text(state);
 						$('button[entity="'+entity+'"]').removeClass("btn-default");
 						$('button[entity="'+entity+'"]').removeClass("btn-success");
 						$('button[entity="'+entity+'"]').removeClass("btn-purple");
+						$('button[entity="'+entity+'"]').removeClass("btn-undef");
 						$('button[entity="'+entity+'"]').removeClass("btn-warning");
 						$('button[entity="'+entity+'"]').removeClass("btn-danger");
 						$('button[entity="'+entity+'"]').removeClass("btn-info");
@@ -1591,8 +1628,11 @@ var updateStaticPage = function(link,time) {
                 					} else {
                 					create_state_modal(entity);
                 					}
-								} else {				
-									create_state_modal(entity);
+								// RF Global fallback. Toggle MIN/MAX in list of states - only multistate items
+                                } else if (json_store.ia7_config.prefs.direct_control == "yes" && json_store.objects[entity].states.length > 1) {
+                                        direct_control(entity); 
+								    } else {				
+									    create_state_modal(entity);
 								}
 							});
                             $('button[entity="'+entity+'"]').mayTriggerLongClicks().on( 'longClick', function() {		        
@@ -1652,35 +1692,29 @@ var direct_control = function (entity){
     var states;
     if (dc_states === undefined)
     {
-        var isMainstate = function(x){return filterSubstate(x) == 0;};
-        states = json_store.objects[entity].states.filter(isMainstate);
-        if (states.length !== 2){
-             something_went_wrong("direct_control","Check configuration of "+entity+". "+possible_states+" states detected for direct control object. State is "+new_state);
-            return false;
-        }
+        // isMainstate = function(x){return filterSubstate(x) == 0;};
+        states = json_store.objects[entity].states; //.filter(isMainstate);
     }
    else
     {
-        if (dc_states.length !== 2)
-        {
-          something_went_wrong("direct_control", "Bad 'direct_control_states' configuration for '"+entity+"' in ia7_config.json. "+
-                "'direct_control_states' needs exactly 2 entries. E.g:"+
-               "<code>" + 
-                "    \""+entity+"\" : {\n" +
-                "        \"direct_control_states\": [\n" +
-                "            \"on\",\n" +
-                "            \"off\"\n" +
-                "        ],\n" +
-                "        \"direct_control\": \"yes\"\n" +
-                "    },\n"+
-                "</code>");
-            return false;
-        }
-        states = dc_states;
+        states = dc_states.split(',');
     }
-
+    if (states === undefined || states.length < 2) {
+        console.log("WARNING: Direct Control state strange for "+entity);
+        return
+    }
+    // MH seems to use lower case for states so do case insensitive search
     var current_state = json_store.objects[entity].state;
-    var new_state = current_state != states[0] ? states[0] : states[1];
+    var state_loc = 0;
+    // find element location. If no location found then assume an error and pick states[0]
+    states.forEach(function(item,index) {
+      if (item.toLowerCase() === current_state.toLowerCase()) {
+        state_loc = index + 1;
+        }
+      });
+    if (state_loc == states.length) state_loc = 0;
+    var new_state = states[state_loc++];
+
     url= '/SET;none?select_item='+entity+'&select_state='+new_state;
     $.get(url).fail(function() {
         something_went_wrong("Command","Communication issue with Misterhouse");                        
@@ -1720,7 +1754,7 @@ var loadCollection = function(collection_keys) {
 		if (item !== undefined) {
 			if (json_store.objects === undefined || json_store.objects[item] === undefined) {
 				var path_str = "/objects";
-				var arg_str = "fields=state,states,label,state_log,schedule,logger_status,&items="+item;
+				var arg_str = "fields=state,states,label,state_log,schedule,logger_status,state_override,&items="+item;
 				$.ajax({
 					type: "GET",
 					url: "/json"+path_str+"?"+arg_str,
@@ -1741,13 +1775,14 @@ var loadCollection = function(collection_keys) {
                 }
 
 				var name = item;
-				var color = getButtonColor(json_store.objects[item].state);
+				var state = getState(json_store.objects[item].state);
+				var color = getButtonColor(state);
 				if (json_store.objects[item].label !== undefined) name = json_store.objects[item].label;
 				var dbl_btn = "";
 				if (name.length < 30) dbl_btn = "<br>"; 
 				var button_html = "<div style='vertical-align:middle'><button entity='"+item+"' ";
-				button_html += "class='btn  btn-"+color+" btn-lg btn-block btn-list btn-popover "+ btn_direct +" btn-state-cmd navbutton-padding'>";
-				button_html += name+dbl_btn+"<span class='pull-right object-state'>"+json_store.objects[item].state+"</span></button></div>";
+				button_html += "class='btn btn-"+color+" btn-lg btn-block btn-list btn-popover "+ btn_direct +" btn-state-cmd navbutton-padding'>";
+				button_html += name+dbl_btn+"<span class='pull-right object-state'>"+state+"</span></button></div>";
 			    button_html = "<div class='col-sm-4' colid='"+i+"'>" + button_html + "</div>";
 				entity_arr.push(button_html);
 				items += item+",";		
@@ -1844,7 +1879,10 @@ var loadCollection = function(collection_keys) {
                     create_state_modal(entity);
                 }
             }
-            else {
+            // RF Global fallback. Toggle MIN/MAX in list of states - only multistate items
+            else if (json_store.ia7_config.prefs.direct_control == "yes" && json_store.objects[entity].states.length > 1) {
+                direct_control(entity);
+            } else {
                 create_state_modal(entity);
             }
         });
@@ -2042,6 +2080,7 @@ var get_stats = function(tagline) {
                     if (json.data.raining !== undefined && json.data.raining ) raining = 1;
                     if (json.data.snowing !== undefined && json.data.snowing) snowing = 1;
                     if (json.data.night !== undefined && json.data.night) night = 1;			        
+                // RF suspect dependency on value of 'clouds' here - eg at 'night' or 'fair' NOAA sets cloud to ''. cloud = conditions
                     if (json.data.clouds !== undefined) {
                         $('.mh-wi-icon').addClass(get_wi_icon(json.data.clouds,raining,snowing,night));
                     } else {
@@ -2053,9 +2092,18 @@ var get_stats = function(tagline) {
                 $('.mh-wi').click( function () {
                     var summary = "<strong>Summary:</strong>&nbsp;&nbsp;"+json.data.summary_long+"<br>";
                     summary += "<strong>Last Updated:</strong>&nbsp;&nbsp;"+json.data.weather_lastupdated;
+                     // RF Don't understand original logic: if clouds undefined, then clouds here is blank string ?
                     if ($('.mh-wi-icon').hasClass("wi-na")) {
                         summary += "<br><strong>Clouds:</strong>&nbsp;&nbsp"+json.data.clouds;
                     }
+                    // RF TODO forecast ideally rendered as an icon - as provided
+                    $('.mh-wi-icon').addClass(get_wi_icon(json.data.clouds,raining,snowing,night));
+                    if (json.data.ForecastHigh !== undefined && json.data.ForecastLow !== undefined && json.data.ForecastConditions !== undefined) {
+                      summary += "<br><strong>Forecast High / Low / Conditions:</strong>&nbsp;&nbsp"+json.data.ForecastHigh + 
+                      "&deg / " + json.data.ForecastLow + "&deg / " + json.data.ForecastConditions
+                    }                    
+                    summary += "<br><strong>Sunrise / Sunset:</strong>&nbsp;&nbsp"+json.data.sunrise + " / " + json.data.sunset;
+
                 	$('#lastResponse').find('.modal-body').html(summary);
 					$('#lastResponse').modal({
 						    show: true
@@ -2089,28 +2137,28 @@ var get_wi_icon = function (conditions,rain,snow,night) {
         icon += "day-";
     }
 
-    if (conditions == "overcast") {
+    if (conditions.match (/overcast/) ) {
         icon = "wi-cloudy";       
         if (rain) icon = "wi-rain";
         if (snow) icon = "wi-snow";
  
-    } else if (conditions == "rain") {
+    } else if (conditions.match (/(rain|drizzle|shower)/) ) {
             icon += "rain";
      
-    } else if (conditions == "snow") {
+    } else if (conditions.match (/(snow|sleet)/) ) {
             icon += "snow";     
         
-    } else if (conditions == "sky clear" || conditions == "" || conditions == "clear" || conditions == "sunny" || conditions == "mostly sunny") {
+    } else if (conditions.match (/(clear|sunny|fair)/) ) {
         if (night) {
             icon = "wi-night-clear";
         } else {
             icon = "wi-day-sunny";
         }
         
-    } else if (conditions.includes("thunderstorm")) {
+    } else if (conditions.match(/thunder/) ) {
         icon = "wi-thunderstorm";
         
-    } else if (conditions.includes("mist") || conditions.includes("fog")) {
+    } else if (conditions.match(/(mist|fog)/) ) {
         icon += "fog";  
 
     } else if (conditions.includes("breezy")) {
@@ -2130,7 +2178,7 @@ var get_wi_icon = function (conditions,rain,snow,night) {
             }
         }
                 
-    } else if (conditions.includes("clouds") || conditions.includes("cloudy") || conditions.includes("partly sunny")) {
+    } else if (conditions.match(/(cloud|partly sunny)/) ) {
         if (rain) {
             icon += "rain";
         } else if (snow) {
@@ -2233,9 +2281,15 @@ var ajax_req_error = function(xhr, status, error, module, modal) {
      if (xhr == undefined || xhr.responseText == undefined || xhr.responseText == "") {
          message = "Lost communication with server";
      } else {
-         var data = JSON.parse(xhr.responseText);
          message = "Communication problem with server";
-         if (data !== undefined && data.text !== undefined) message = data.text;
+         try{
+             var data = JSON.parse(xhr.responseText);
+             if (data !== undefined && data.text !== undefined) message = data.text;
+         }
+         catch
+         {
+             message += `: ${xhr.status} - ${xhr.statusText}`;
+         }
      }
      console.log("Ajax Error! module="+module+" status="+status+" error="+error+" msg="+message);
      
@@ -2422,12 +2476,19 @@ var graph_rrd = function(start,group,time) {
 		updateSocket.abort();
 	}	
 	var path_str = "/rrd"  
-	//if the group has a dot, then it is a separate source
+	//console.log("db start="+start+" group="+group+" time="+time);
 	var source = "&group="+group;
-	if (group.indexOf(".") !== -1) {
+	//if the group starts with file= then it is an object/file
+	if (group.toLowerCase().startsWith("file:")) {
+	    var rrd_source = group.split(":");
+	    source = "&file="+rrd_source[1]+"&ds="+rrd_source[2];	    
+    }
+	//if the group has a dot, then it is a separate source
+	else if (group.indexOf(".") !== -1) {
 	    var rrd_source = group.split(".");
 	    source = "&source="+rrd_source[0]+"&group="+rrd_source[1];
 	}
+
 	var arg_str = "start="+start+source+"&time="+time;
 	updateSocket = $.ajax({
 		type: "GET",
@@ -2540,6 +2601,7 @@ var graph_rrd = function(start,group,time) {
 				var previousPoint = null;
 
 				$("#rrd-graph").bind("plothover", function(event, pos, item) {
+//tofixed caused a problem
     				$("#x").text(pos.x.toFixed(2));
     				$("#y").text(pos.y.toFixed(2));
     				if (item) {
@@ -2682,7 +2744,7 @@ var object_history = function(items,start,days,time) {
     			//	$(this).datepicker();
 				//});
 				$('#datepicker').datepicker({
-					format: "yyyy-m-d"
+					format: "yyyy-mm-dd"
 				});
 				
 				$('.update_history').click(function() {
@@ -2801,8 +2863,10 @@ var object_history = function(items,start,days,time) {
 						json.data.data.reverse();
 						for (var i = 0; i < json.data.data.length; i++){
 							html +="<tr>";
-					  		html += "<td data-title='Time'>"+new Date(json.data.data[i][0]).toString().replace(/GMT-\d\d\d\d/,"")+"</td>";
-					  		html += "<td data-title='State'>"+String(json.data.data[i][1])+"</td>";
+                            // RF spells out summer time(longhand) + timezone... too much
+//					  		html += "<td data-title='Time'>"+new Date(json.data.data[i][0]).toString().replace(/GMT[+-]\d\d\d\d/,"")+"</td>";
+                            html += "<td data-title='Time'>"+new Date(json.data.data[i][0]).toLocaleString()+"</td>";
+                            html += "<td data-title='State'>"+String(json.data.data[i][1])+"</td>";
 					  		html += "<td data-title='Setby'>"+String(json.data.data[i][2])+"</td>";
 							html += "</tr>";
 						}
@@ -3135,7 +3199,7 @@ var floorplan = function(group,time) {
     };
 
     var path_str = "/objects";
-    var fields = "fields=fp_location,state,states,fp_icons,schedule,logger_status,fp_icon_set,img,link,label,type";
+    var fields = "fields=fp_location,state,states,fp_icons,schedule,logger_status,fp_icon_set,img,link,label,type,state_override";
     if (json_store.ia7_config.prefs.state_log_show === "yes") fields += ",state_log";
     var arg_str = "parents="+group+"&"+fields+"&long_poll=true&time="+time;
 
@@ -3227,15 +3291,15 @@ var floorplan = function(group,time) {
                                                                 html += "</div><div class='btn-group btn-block stategrp"+stategrp+"'>";
                                                                 buttons = 1;
                                                             }
-
-                                                            var color = getButtonColor(po_states[i]);
+															var state = getState(po_states[i]);
+                                                            var color = getButtonColor(state);
                                                             //TODO disabled override
                                                             var disabled = "";
-                                                            if (po_states[i] === json_store.objects[fp_entity].state) {
+                                                            if (state === json_store.objects[fp_entity].state) {
                                                                 disabled = "disabled";
                                                             }
                                                             html += "<button class='btn btn-state-cmd col-sm-6 col-xs-6 btn-"+color+" "+disabled+"'";
-                                                            var url= '/SET;none?select_item='+fp_entity+'&select_state='+po_states[i];
+                                                            var url= '/SET;none?select_item='+fp_entity+'&select_state='+state;
                                                             html += '">'+po_states[i]+'</button>';
                                                         }
                                                     }
@@ -3506,12 +3570,13 @@ var floorplan = function(group,time) {
 
 var get_fp_image = function(item,size,orientation) {
   	var image_name;
-	var image_color = getButtonColor(item.state);
+  	var state = getState(item.state);
+	var image_color = getButtonColor(state);
 	var baseimg_width = $(window).width();
   //	if (baseimg_width < 500) fp_icon_image_size = "32" // iphone scaling
 	//kvar fp_icon_image_size = "32"
  	if (item.fp_icons !== undefined) {
- 		if (item.fp_icons[item.state] !== undefined) return item.fp_icons[item.state];
+ 		if (item.fp_icons[state] !== undefined) return item.fp_icons[state];
  	}
  	if (item.fp_icon_set !== undefined) {
 		return "fp_"+item.fp_icon_set+"_"+image_color+"_"+fp_icon_image_size+".png";
@@ -3524,7 +3589,8 @@ var get_fp_image = function(item,size,orientation) {
 		item.type === "EIB_Item" || item.type === "EIB1_Item" ||
 		item.type === "EIB2_Item" || item.type === "EIO_Item" ||
 		item.type === "UIO_Item" || item.type === "X10_Item" ||
-		item.type === "xPL_Plugwise" || item.type === "X10_Appliance") {
+		item.type === "xPL_Plugwise" || item.type === "X10_Appliance" ||
+		item.type === "xPL_Light" || item.type === "xPL_Control")  {
 
 			return "fp_light_"+image_color+"_"+fp_icon_image_size+".png";
   	}
@@ -3552,6 +3618,10 @@ var create_state_modal = function(entity) {
 		var name = entity;
 		if (json_store.objects[entity].label !== undefined) name = json_store.objects[entity].label;
 		$('#slider').remove();
+		$('#sliderR').remove();
+		$('#sliderG').remove();
+		$('#sliderB').remove();
+		
 //		$('#control').modal('show');
 
         //make sure the modal is centered on all devices
@@ -3570,17 +3640,32 @@ var create_state_modal = function(entity) {
         });
 
 		
-		var modal_state = json_store.objects[entity].state;
-		var title = name + " - <span class='modal-object-state'>" + json_store.objects[entity].state + "</span>";
+//RF		var modal_state = json_store.objects[entity].state;
+		var title = "";
+
+//TODO Find a better place for this button, and close the modal when clicked.
+		if (json_store.objects[entity].rrd !== undefined) {
+			var collid = $(location).attr('href').split("_collection_key=");
+			var link = "/ia7/#path=/rrd?now-6hour?file:"+json_store.objects[entity].rrd+"?1&_collection_key="+collid[1]+",";
+			title += "<a href='"+link+"' class='btn btn-success btn-sm rrd_data'><i class='fa fa-line-chart'></i></a> ";
+		}
+		
+		title += name + " - <span class='modal-object-state'>" + json_store.objects[entity].state + "</span>";
         if (json_store.objects[entity].rgb !== undefined) {
             title += '  <i class="fa fa-lg fa-circle fa-rgb-border object-color" style="color:rgb('+json_store.objects[entity].rgb+');"></i></span>';
         }
+
+		
 		$('#control').find('.object-title').html(title);
 		$('#control').find('.control-dialog').attr("entity", entity);
 		var modal_states = json_store.objects[entity].states;
+		var rgb_only = 0;
+		if (modal_states !== undefined) if (modal_states.length == 1 && modal_states[0] == 'rgb') rgb_only = 1;
+		//console.log("rgb_only ="+rgb_only+" "+modal_states.length+" "+modal_states[0]);
+//HP RGB control updates
 		// HP need to have at least 2 states to be a controllable object...
 		if (modal_states == undefined) modal_states = 1;
-		if (modal_states.length > 1) {
+		if (modal_states.length > 1 || rgb_only) {
 			$('#control').find('.states').html('<div class="btn-group stategrp0 btn-block"></div>');
 			var modal_states = json_store.objects[entity].states;
 			var buttonlength = 0;
@@ -3591,8 +3676,10 @@ var create_state_modal = function(entity) {
 			var group_buttons = 4;
 
 			var slider_active = 1;
-            if (!sliderObject(modal_states) || (json_store.ia7_config.prefs.state_slider !== undefined && json_store.ia7_config.prefs.state_slider == "no")) slider_active = 0;
+		//console.log("slider ="+sliderObject(modal_states)+", "+json_store.ia7_config.prefs.state_slider+", "+json_store.ia7_config.prefs.state_slider);
 
+            if ((!sliderObject(modal_states) && !rgb_only) || (json_store.ia7_config.prefs.state_slider !== undefined && json_store.ia7_config.prefs.state_slider == "no")) slider_active = 0;
+        //console.log("slider_active="+slider_active);
 			// get number of displayed buttons so we can display nicely.
 			for (var i = 0; i < modal_states.length; i++){
 				if (filterSubstate(modal_states[i],slider_active) !== 1) display_buttons++
@@ -3620,9 +3707,10 @@ var create_state_modal = function(entity) {
                         $('#control').find('.states').append("<div class='btn-group btn-block stategrp"+stategrp+"'></div>");
                         buttonlength = 1;
                     }
-                    var color = getButtonColor(modal_states[i])
-                    var disabled = ""
-                    if (modal_states[i] == json_store.objects[entity].state) {
+                    var state = getState(modal_states[i]);
+                    var color = getButtonColor(state);
+                    var disabled = "";
+                    if (state == getState(json_store.objects[entity].state)) {
                         disabled = "disabled";
                     }
                     //global override
@@ -3637,14 +3725,18 @@ var create_state_modal = function(entity) {
                             disabled = "";
                         }
                     }
-                $('#control').find('.states').find(".stategrp"+stategrp).append("<button class='btn col-sm-"+grid_buttons+" col-xs-"+grid_buttons+" btn-"+color+" "+disabled+"'>"+modal_states[i]+"</button>");					
+                    //override state if set in the object (ie HA_Item:Cover)
+                    if (json_store.objects[entity].state_override) {
+                        disabled = "";
+                    }                  
+                $('#control').find('.states').find(".stategrp"+stategrp).append("<button class='btn col-sm-"+grid_buttons+" col-xs-"+grid_buttons+" btn-"+color+" "+disabled+"'>"+state+"</button>");					
                 }
                 if (slider_active) {
                     if ($(".stategrp0").children().length == 0) {  
                         $(".stategrp0").remove();
                     }
                    var slider_data = sliderDetails(modal_states);		                
-                   $('#control').find('.states').append("<div id='slider' class='brightness-slider'></div>");					
+                   $('#control').find('.states').append("<div id='slider' class='brightness-slider lumen-slider'></div>");					
                    var val = $(".modal-object-state").text().replace(/\%/,'');              
                    var position = slider_data.values.indexOf(val);
                    if (val == "on") position = slider_data.max;
@@ -3684,7 +3776,9 @@ var create_state_modal = function(entity) {
                        });
                    });
                 if (json_store.objects[entity].rgb !== undefined) {
-                        $('#control').find('.states').append("<br><div id='sliderR' class='rgb-slider brightness-slider red-handle'></div>");					
+                        var firstbreak = "<br>";
+                        if (rgb_only) firstbreak = "";
+                        $('#control').find('.states').append(firstbreak+"<div id='sliderR' class='rgb-slider brightness-slider red-handle'></div>");					
                         $('#control').find('.states').append("<br><div id='sliderG' class='rgb-slider brightness-slider green-handle'></div>");					
                         $('#control').find('.states').append("<br><div id='sliderB' class='rgb-slider brightness-slider blue-handle'></div>");
                         
@@ -3727,6 +3821,11 @@ var create_state_modal = function(entity) {
                  }
         if (slider_active) {
 		    advanced_html = "<br>"+advanced_html; //this is clunky but showing advanced states is kinda ugly anyways
+        }
+        if (rgb_only) {
+            $(".stategrp0").remove();
+            $(".lumen-slider").remove();
+            
         }
 		$('#control').find('.states').append("<div class='btn-group advanced btn-block'>"+advanced_html+"</div>");
 
@@ -3925,7 +4024,7 @@ var create_state_modal = function(entity) {
 			if (json_store.objects[entity].logger_status == "1") {
 				var collid = $(location).attr('href').split("_collection_key=");
 				var link = "/ia7/#path=/history?"+entity+"?1&_collection_key="+collid[1]+",";
-				object_log_header += "<a href='"+link+"' class='pull-right btn btn-success btn-xs logger_data'><i class='fa fa-line-chart'></i></a>";
+				object_log_header += "<a href='"+link+"' class='pull-right btn btn-success btn-xs logger_data'><i class='fa fa-history'></i></a>";
 			}
 			object_log_header += "</h4>"
 //			$('#control').find('.modal-body').append("<div class='obj_log'><h4>Object Log</h4>");
@@ -3937,7 +4036,7 @@ var create_state_modal = function(entity) {
 				$('#control').find('.obj_log').append(slog[0]+"<span class='mh_set_by hidden'>set_by="+slog[1]+"</span><br>");
 			}
 		}
-		
+
 		if (developer === true) 
 		    $('.mhstatemode').show();
 		else
@@ -3950,12 +4049,15 @@ var create_state_modal = function(entity) {
 		$('.logger_data').on('click',function() {
 			$('#control').modal('hide');
 		});
+		$('.rrd_data').on('click',function() {
+			$('#control').modal('hide');
+		});		
 }	
 
 var create_develop_item_modal = function(colid,col_parent) {
 
     if (colid == undefined || col_parent == undefined) {
-        console.log("create develop modal, colid="+colid+" col_parent="+col_parent);
+        //console.log("create develop modal, colid="+colid+" col_parent="+col_parent);
     } else {        
         $('#devModal').find('.modal-title').html("Edit Collection ID: <strong>"+colid+"</colid>");
         var html = "<form class='form-horizontal dev-collection-edit'>";
@@ -4124,7 +4226,7 @@ var create_develop_item_modal = function(colid,col_parent) {
                   currentUser: {user: current_user},
                   success: function( data, status, error){
                         var user = this.currentUser.user;
-                        console.log("data="+data+" status="+status+" error="+error+" user="+user);
+                        //console.log("data="+data+" status="+status+" error="+error+" user="+user);
                         //throw up red warning if the response isn't good from MH
                         if (data.status !== undefined || data.status == "error") {
                             var message = "Unknown server error";
@@ -4145,8 +4247,8 @@ var create_develop_item_modal = function(colid,col_parent) {
                         var user = this.currentUser.user;                        
                         var data = JSON.parse(xhr.responseText);
                         if (data !== undefined && data.text !== undefined) message = data.text;
-                        console.log("status="+status);
-                        console.log("error="+error);
+                        //console.log("status="+status);
+                        //console.log("error="+error);
                         $(".modal-header").append($("<div class='write-status alert alerts-modal alert-danger fade in' data-alert><p><i class='fa fa-exclamation-triangle'>&nbsp;</i><strong>Failure:</strong>&nbsp;"+message+"</p></div>"));
    	 		            $(".write-status").delay(4000).fadeOut("slow", function () { $(this).remove(); });
    	 		            json_store.collections[700].user = user;
@@ -4727,7 +4829,7 @@ $(document).ready(function() {
                 if (!cls.match('ui-sortable-helper')) {
                     var colid = $(this).attr("colid");
                     var col_parent=500;
-                    console.log("option colid="+colid+" col_parent="+col_parent);
+                    //console.log("option colid="+colid+" col_parent="+col_parent);
                     create_develop_item_modal(colid,col_parent);
                     $('#optionsModal').modal('hide');    
                 }            

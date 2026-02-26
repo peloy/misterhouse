@@ -1,5 +1,13 @@
 # Category = Irrigation
 
+# Fall 2024
+# v4.0
+# Included ability to write to Opensprinkler Home Assistant Object
+
+# April 2023
+# v3.0
+# -reverted to WU model and migrated to VisualCrossing
+
 # June 2018
 # v1.3
 # - added check if wudata returns null data
@@ -96,9 +104,19 @@ use Date::Calc qw(Day_of_Year);
 my $debug = 0;
 my $msg_string;
 my $rrd = "";
+my $vc_eto = "";
+my $ha_send_email_on_fail = 0;
 
 $p_wu_forecast = new Process_Item
-  qq[get_url --quiet "http://api.wunderground.com/api/$config_parms{wu_key}/astronomy/yesterday/conditions/forecast/q/$config_parms{eto_location}.json" "$config_parms{data_dir}/wuData/wu_data.json"];
+  qq[get_url --quiet "https://weather.visualcrossing.com/VisualCrossingWebServices/rest/services/timeline/$config_parms{vc_location}?unitGroup=metric&key=$config_parms{vc_key}" "$config_parms{data_dir}/wuData/wu_data.json"];
+##  qq[get_url --quiet ""];
+
+
+$p_vc_et = new Process_Item
+  qq[get_url --quiet "https://weather.visualcrossing.com/VisualCrossingWebServices/rest/services/timeline/$config_parms{vc_location}?unitGroup=metric&elements=et0&key=$config_parms{vc_key}&contentType=json" "$config_parms{data_dir}/wuData/vc_eto_data.json"];
+#  qq[get_url --quiet ""];
+
+
 $v_get_eto           = new Voice_Cmd("Update ETO Programs");
 $t_wu_forecast_timer = new Timer;
 
@@ -116,11 +134,18 @@ my $eto_retries_today;
 $config_parms{eto_rainfallsatpoint} = 25     unless ( defined $config_parms{eto_rainfallsatpoint} );
 $config_parms{eto_minmax}           = "5,15" unless ( defined $config_parms{eto_minmax} );
 
+$debug = $Debug{eto} if defined $Debug{eto};
+
+$osp_ha_object = new HA_Item( 'switch', $config_parms{eto_HAopensprinkler_program_name} . "_program_enabled|" . $config_parms{eto_HAopensprinkler_program_name} . "_.*_station_duration|" . $config_parms{eto_HAopensprinkler_program_name} . "_.*day_enabled|" . $config_parms{eto_HAopensprinkler_program_name} . "_start.*_time_offset|" . $config_parms{eto_HAopensprinkler_program_name} . "_start.*_time_offset_type", $ha_house, "delay_between_messages=4" ) if ((defined $config_parms{eto_irrigation}) and (lc $config_parms{eto_irrigation} eq "opensprinkler-ha"));
+$ha_send_email_on_fail = 1 if ( defined $config_parms{eto_email} );
+
 my $eto_ready;
 
 if ( $Startup or $Reload ) {
     $eto_ready = 1;
-    print_log "[calc_eto] v1.3.1 Startup. Checking Configuration...";
+    print_log "[calc_eto] v4.0 Startup.";
+    print_log "[calc_eto] DEBUG Enabled" if ($debug);
+    print_log "[calc_eto] Checking Configuration...";
     mkdir "$eto_data_dir"                  unless ( -d "$eto_data_dir" );
     mkdir "$eto_data_dir/ET"               unless ( -d "$eto_data_dir/ET" );
     mkdir "$eto_data_dir/logs"             unless ( -d "$eto_data_dir/logs" );
@@ -148,10 +173,18 @@ if ( $Startup or $Reload ) {
         print_log "[calc_eto] ERROR! eto_zone_crop undefined!!";
         $eto_ready = 0;
     }
-    unless ( defined $config_parms{wu_key} ) {
-        print_log "[calc_eto] ERROR! wu key undefined!!";
+    if ( defined $config_parms{wu_key} ) {
+        print_log "[calc_eto] ERROR! Weather Underground no longer supported. Need a Visual Crossing Key";
         $eto_ready = 0;
     }
+    unless ( defined $config_parms{vc_key} ) {
+        print_log "[calc_eto] ERROR! No Visual Crossing API key specified";
+        $eto_ready = 0;
+    }
+    unless ( defined $config_parms{vc_location} ) {
+        print_log "[calc_eto] ERROR! No Visual Crossing location specified";
+        $eto_ready = 0;
+    }    
     if ( defined $config_parms{eto_rrd} ) {
         if ($config_parms{eto_rrd} eq "metric") {
             print_log "[calc_eto] Will write daily rain to RRD (mms)";
@@ -184,16 +217,47 @@ if ( ( said $v_get_eto) or ( $New_Minute and ( $Time_Now eq $eto_calc_time ) ) )
         print_log "[calc_eto] Starting Daily ETO Calculation Process...";
         $eto_retries_today = 0;
         start $p_wu_forecast;
+        ##start $p_vc_et; disabled due to not being available through free license.
     }
     else {
         print_log "[calc_eto] ERROR! ETo configuration problem. ETo will not calcuate";
     }
 }
 
+#This requires a corporate license, so leave in the stub but don't enable VC ET
+if ( done_now $p_vc_et) {
+    my $write_secs = time() - ( stat("$config_parms{data_dir}/wuData/vc_eto_data.json") )[9];
+    if ( $write_secs > 300 ) { 
+        print_log "[calc_eto] Stale ETo Data, ignoring vc ETo. VC Data written $write_secs seconds ago...";
+        $vc_eto = "Invalid"; 
+    }
+    else {
+    }
+    my $etdata;
+    if ( open( my $fh, "$config_parms{data_dir}/wuData/vc_eto_data.json" ) ) {
+        local $/;    #otherwise raw_data is empty?
+        my $raw_etdata = <$fh>;
+
+        #			eval { $data = JSON::XS->new->decode($raw_data) };
+        eval { $etdata = decode_json($raw_etdata) };
+        if ($@) {
+            print_log "[calc_eto] ERROR Problem parsing et data vc_eto_data.json! $@\n";
+        }
+        close($fh);
+    }
+    else {
+        print_log "[calc_eto] ERROR Problem opening er data vc_eto_data.json\n";
+        close($fh);
+    }
+    print_log "[calc_eto] VC ET Data:\n";
+    print Dumper $etdata;
+    start $p_wu_forecast
+}
+
 if ( done_now $p_wu_forecast) {
     my $write_secs = time() - ( stat("$config_parms{data_dir}/wuData/wu_data.json") )[9];
-    if ( $write_secs > 300 ) {
-        print_log "[calc_eto] Stale Data, not calculating ETo. WU Data written $write_secs ago...";
+    if ( $write_secs > 300 ) { 
+        print_log "[calc_eto] Stale Data, not calculating ETo. WU Data written $write_secs seconds ago...";
     }
     else {
         my $program_data = &calc_eto_runtimes( $eto_data_dir, "file", $config_parms{eto_location}, "$config_parms{data_dir}/wuData/wu_data.json" );
@@ -202,9 +266,19 @@ if ( done_now $p_wu_forecast) {
                 if ( lc $config_parms{eto_irrigation} eq "opensprinkler" ) {
                     my $os_program = &get_object_by_name( $config_parms{eto_opensprinkler_program} );
                     my ( $run_times, $run_seconds ) = $program_data =~ /\[\[(.*)\],\[(.*)\]\]/;
-                    print_log "[calc_eto] Loading values $run_times,$run_seconds into program $config_parms{eto_opensprinkler_program}";
+                    print_log "[calc_eto] Loading values $run_times,$run_seconds into Opensprinkler program $config_parms{eto_opensprinkler_program}";
                     $os_program->set_program( $Day, $run_times, $run_seconds );
-                }    #elsif (other sprinkler system...)
+                    
+                } elsif  ( lc $config_parms{eto_irrigation} eq "opensprinkler-ha" ) {
+                     print_log "[calc_eto] Loading values program_data into Home Assistant program $config_parms{eto_opensprinkler_program}";
+                     my $ha_retries = 5;
+                     $ha_retries = $config_parms{eto_HAopensprinkler_retries} if (defined $config_parms{eto_HAopensprinkler_retries});
+                     my $ha_retry_delay = 120;
+                     $ha_retry_delay = $config_parms{eto_HAopensprinkler_retry_delay} if (defined $config_parms{eto_HAopensprinkler_retry_delay});
+                     update_osp_ha_entities( $program_data, $ha_retries, $ha_retry_delay );	
+                } else {
+                     print_log "[calc_eto] WARNING No irrigation system specified to upload program!";
+		}
             }
         }
         else {
@@ -212,8 +286,6 @@ if ( done_now $p_wu_forecast) {
                 $eto_retries_today++;
                 print_log "[calc_eto] WARNING! bad program data, retry attempt $eto_retries_today";
                 set $t_wu_forecast_timer 600;
-
-                #start $p_wu_forecast;
             }
             else {
                 print_log "[calc_eto] ERROR! retry max $eto_retries reaches. Aborting calculation attempt";
@@ -232,40 +304,41 @@ if ( expired $t_wu_forecast_timer) {
 # Don't worry about wet conditions like fog these are accounted for below we are only concerned with how much sunlight is blocked at ground level
 
 our $conditions = {
-    'Clear'                        => 0,
-    'Partial Fog'                  => 2,
-    'Patches of Fog'               => 2,
-    'Haze'                         => 2,
-    'Shallow Fog'                  => 3,
-    'Scattered Clouds'             => 4,
-    'Unknown'                      => 5,
-    'Fog'                          => 5,
-    'Partly Cloudy'                => 5,
-    'Mostly Cloudy'                => 8,
-    'Mist'                         => 10,
-    'Light Drizzle'                => 10,
-    'Light Freezing Drizzle'       => 10,
-    'Light Freezing Rain'          => 10,
-    'Light Freezing Fog'           => 5,
-    'Light Ice Pellets'            => 10,
-    'Light Rain'                   => 10,
-    'Light Rain Showers'           => 10,
-    'Light Snow'                   => 10,
-    'Light Snow Grains'            => 10,
-    'Light Snow Showers'           => 10,
-    'Light Thunderstorms and Rain' => 10,
-    'Low Drifting Snow'            => 10,
-    'Rain'                         => 10,
-    'Rain Showers'                 => 10,
-    'Snow'                         => 10,
-    'Snow Showers'                 => 10,
-    'Thunderstorm'                 => 10,
-    'Thunderstorms and Rain'       => 10,
-    'Blowing Snow'                 => 10,
-    'Chance of Snow'               => 10,
-    'Freezing Rain'                => 10,
-    'Unknown Precipitation'        => 10,
-    'Overcast'                     => 10,
+    'clear'                        => 0,
+    'partial fog'                  => 2,
+    'patches of fog'               => 2,
+    'haze'                         => 2,
+    'shallow fog'                  => 3,
+    'scattered clouds'             => 4,
+    'unknown'                      => 5,
+    'fog'                          => 5,
+    'partly cloudy'                => 5,
+    'partially cloudy'             => 5,
+    'mostly cloudy'                => 8,
+    'mist'                         => 10,
+    'light drizzle'                => 10,
+    'light freezing drizzle'       => 10,
+    'light freezing rain'          => 10,
+    'light freezing fog'           => 5,
+    'light ice pellets'            => 10,
+    'light rain'                   => 10,
+    'light rain showers'           => 10,
+    'light snow'                   => 10,
+    'light snow grains'            => 10,
+    'light snow showers'           => 10,
+    'light thunderstorms and rain' => 10,
+    'low drifting snow'            => 10,
+    'rain'                         => 10,
+    'rain showers'                 => 10,
+    'snow'                         => 10,
+    'snow showers'                 => 10,
+    'thunderstorm'                 => 10,
+    'thunderstorms and rain'       => 10,
+    'blowing snow'                 => 10,
+    'chance of snow'               => 10,
+    'freezing rain'                => 10,
+    'unknown precipitation'        => 10,
+    'overcast'                     => 10,
 };
 
 # List of precipitation conditions we don't want to water in, the conditions will be checked to see if they contain these phrases.
@@ -403,7 +476,7 @@ sub getwuData {
     #return if ($key == '' or (scalar ($tloc) < 2));
     my $ua = new LWP::UserAgent( keep_alive => 1 );
 
-    my $request = HTTP::Request->new( GET => "http://api.wunderground.com/api/$key/astronomy/yesterday/conditions/forecast/q/$loc.json" );
+    my $request = HTTP::Request->new( GET => "https://weather.visualcrossing.com/VisualCrossingWebServices/rest/services/timeline/$config_parms{vc_location}?unitGroup=metric&key=$config_parms{vc_key}" );
 
     my $responseObj = $ua->request($request);
     my $data;
@@ -426,7 +499,7 @@ sub getwuDataTZOffset {
 
     #HP TODO - I'm not sure if this works as expected
     if ( $tzone eq "None" or $tzone eq "" ) {
-        $tzone = $data->{current_observation}->{local_tz_long};
+        $tzone = $data->{tzoffset};
     }
     my $tdelta;
 
@@ -452,14 +525,21 @@ sub getForecastData {
 
     #HP TODO - I don't know why the python wanted to create a bunch of arrays (mm, cor, wfc). It seems like
     #HP TODO -  just the end result is needed
-    if ( @{$data} ) {
+
+#print Dumper $data->{days};
+
+    if ( @{ $data->{days} } ) {
+
 
         my $fadjust = 0;
-        for ( my $day = 1; $day < scalar( @{$data} ); $day++ ) {
-            my $mm  = $data->[$day]->{qpf_allday}->{mm};
-            my $cor = $data->[$day]->{pop};
+#        for ( my $day = 1; (($day < scalar( @{ $data->{days} }) and ($day < 4)); $day++ ) { #only look 4 days out
+        for ( my $day = 1; ($day < scalar( @{ $data->{days} }) and ($day < 4)); $day++ ) { #only look 4 days out
+
+            my $mm  = $data->{days}->[$day]->{precip};
+            my $cor = $data->{days}->[$day]->{precipprob};
             my $wfc = 1 / $day**2;                         #HP I assume this is to modify that further days out are more volatile?
             $fadjust += safe_float( $mm, -1 ) * ( safe_float( $cor, -1 ) / 100 ) * safe_float( $wfc, -1 );
+            print "gfd mm=$mm cor=$cor wfc=$wfc fa=$fadjust\n" if ($debug);
         }
         return $fadjust;
     }
@@ -474,10 +554,10 @@ sub getAstronomyData {
         return ( { "rise" => -1, "set" => -1 } );
     }
 
-    my $rHour = safe_int( $data->{'sunrise'}->{'hour'}, 6 );
-    my $rMin  = safe_int( $data->{'sunrise'}->{'minute'} );
-    my $sHour = safe_int( $data->{'sunset'}->{'hour'}, 18 );
-    my $sMin  = safe_int( $data->{'sunset'}->{'minute'} );
+    my $rHour = ( localtime($data->{currentConditions}->{sunriseEpoch}))[2];
+    my $rMin  = ( localtime($data->{currentConditions}->{sunriseEpoch}))[1];
+    my $sHour = ( localtime($data->{currentConditions}->{sunsetEpoch}))[2];
+    my $sMin  = ( localtime($data->{currentConditions}->{sunsetEpoch}))[1];
     if ( $rHour, $rMin, $sHour, $sMin ) {
         return ( { "rise" => $rHour * 60 + $rMin, "set" => $sHour * 60 + $sMin } );
     }
@@ -501,14 +581,14 @@ sub getConditionsData {
     }
 
     my $cWeather = "";
-    $cWeather = safe_float( $conditions->{ $current->{weather} }, 5 );
+    $cWeather = safe_float( $conditions->{ $current->{conditions} }, 5 );
 
-    unless ( defined $conditions->{ $current->{weather} } ) {
+    unless ( defined $conditions->{ $current->{conditions} } ) {
 
         # check if any of the chkcond words exist in the $current-{weather}
 
         my $badcond = 0;
-        foreach my $chkword ( split( ' ', lc $current->{weather} ) ) {
+        foreach my $chkword ( split( ' ', lc $current->{conditions} ) ) {
             $badcond = 1 if ( defined $chkcond->{$chkword} );
         }
 
@@ -517,21 +597,21 @@ sub getConditionsData {
             $cWeather = 10;
         }
         else {
-            print_log '[calc_eto] INFO Cound not find current conditions ' . $current->{weather};
+#            print_log '[calc_eto] INFO Cound not find current conditions ' . $current->{conditions};
             $cWeather = 5;
         }
     }
 
-    my $cWind = &eto::wind_speed_2m( safe_float( $current->{wind_kph} ), 10 );
-    my $cTemp = safe_float( $current->{temp_c}, 20 );
+    my $cWind = &eto::wind_speed_2m( safe_float( $current->{windspeed} ), 10 );
+    my $cTemp = safe_float( $current->{temp}, 20 );
 
     # current rain will only be used to adjust watering right before the start time
 
-    my $cmm      = safe_float( $current->{precip_today_metric} );                            # Today's predicted rain (mm)
-    my $pWind    = &eto::wind_speed_2m( safe_float( $predicted->{avewind}->{kph} ), 10 );    # Today's predicted wind (kph)
-    my $pLowTemp = safe_float( $predicted->{low}->{celsius} );                               # Today's predicted low  (C)
-    my $pCoR     = safe_float( $predicted->{pop} ) / 100;                                    # Today's predicted POP  (%)  (Probability of Precipitation)
-    my $pmm      = safe_float( $predicted->{qpf_allday}->{mm} );                             # Today's predicted QFP  (mm) (Quantitative Precipitation Forecast)
+    my $cmm      = safe_float( $current->{precip} );                            # Today's predicted rain (mm)
+    my $pWind    = &eto::wind_speed_2m( safe_float( $predicted->{windspeed} ), 10 );    # Today's predicted wind (kph)
+    my $pLowTemp = safe_float( $predicted->{tempmin} );                               # Today's predicted low  (C)
+    my $pCoR     = safe_float( $predicted->{precipprob} ) / 100;                                    # Today's predicted POP  (%)  (Probability of Precipitation)
+    my $pmm      = safe_float( $predicted->{precip} );                             # Today's predicted QFP  (mm) (Quantitative Precipitation Forecast)
                                                                                              #
 
     # Let's check to see if it's raining, windy, or freezing.  Since watering is based on yesterday's data
@@ -543,9 +623,9 @@ sub getConditionsData {
 
     # Its precipitating
     #HP TODO - this triggered on 'Clear'?
-    if ( $cWeather == 10 and lc $current->{weather} ne 'overcast' ) {
+    if ( $cWeather == 10 and lc $current->{conditions} ne 'overcast' ) {
         $nowater = 1;
-        $whynot .= 'precipitation (' . $current->{weather} . ') ';
+        $whynot .= 'precipitation (' . $current->{conditions} . ') ';
     }
 
     # Too windy
@@ -586,17 +666,16 @@ sub sun_block {
 
         # Now let's find the data for each hour there are more periods than hours so only grab the first
         #in range(len(wuData['history']['observations'])):
-        for ( my $period = 0; $period < scalar( @{ $wuData->{history}->{observations} } ); $period++ ) {
-            if ( safe_int( $wuData->{history}->{observations}->[$period]->{date}->{hour}, -1 ) == $hour ) {
-                if ( $wuData->{history}->{observations}->[$period]->{conds} ) {
-                    print "[$hour,"
-                      . $wuData->{history}->{observations}->[$period]->{conds} . ","
-                      . $conditions->{ $wuData->{history}->{observations}->[$period]->{conds} } . "]\n"
-                      if ($debug);
-                    $cloudCover = safe_float( $conditions->{ $wuData->{history}->{observations}->[$period]->{conds} }, 5 ) / 10;
-                    unless ( defined $cloudCover ) {
-                        $cloudCover = 10;
-                        print_log '[calc_eto] INFO Sun Block Condition not found ' . $wuData->{history}->{observations}->[$period]->{conds};
+        for ( my $period = 0; $period < 23 ; $period++ ) {
+            if ( (localtime($wuData->{days}->[0]->{hours}->[$period]->{datetimeEpoch}))[2] == $hour ) {
+                if ( $wuData->{days}->[0]->{hours}->[$period]->{conditions} ) {
+                    $cloudCover = safe_float( $conditions->{ lc $wuData->{days}->[0]->{hours}->[$period]->{conditions} }, 5 ) / 10;
+                    print "CC1 [$hour,"
+                      . lc $wuData->{days}->[0]->{hours}->[$period]->{conditions} . ","
+                      . $conditions->{ lc $wuData->{days}->[0]->{hours}->[$period]->{conditions} } . "] cloudCover=$cloudCover\n" if ($debug);
+                    unless ( defined $conditions->{ lc $wuData->{days}->[0]->{hours}->[$period]->{conditions} }  ) {
+                        $cloudCover = 1;
+                        print_log '[calc_eto] INFO Sun Block Condition not found ' . $wuData->{days}->[0]->{hours}->[$period]->{conditions};
                     }
                 }
             }
@@ -604,17 +683,41 @@ sub sun_block {
 
         # Found nothing, let's assume it was the same as last hour
         $cloudCover = $previousCloudCover if ( $cloudCover == -1 );
-        print "[$hour,$cloudCover]\n" if ($debug);
+        print "CC2 [hour=$hour,cond=$cloudCover]\n" if ($debug);
         #
 
         $previousCloudCover = $cloudCover;
 
         # Got something now? let's check
         $sh += 1 - $cloudCover if ( $cloudCover != -1 );
-        print "total $sh $cloudCover\n" if ($debug);
+        print "total sh=$sh cloudcover=$cloudCover\n" if ($debug);
 
     }
     return ($sh);
+}
+
+sub getHourlyElements {
+
+    # Difference from WU data. DarkSkies has humidity forecast every hour, so look forward 24 hours to find the min and max.
+        # take the last entry for calculating cover. Could average it, but really the difference isn't that huge I don't think.
+    my ( $wuData) = @_;
+    my ($rh_min, $rh_max);
+    my $meanwindspeed = 0;
+
+    $rh_min = $wuData->{days}->[0]->{hours}->[0]->{humidity}; 
+    $rh_max = $wuData->{days}->[0]->{hours}->[0]->{humidity}; 
+
+    for ( my $period = 1; $period < 23 ; $period++ ) {
+        $rh_min = $wuData->{days}->[0]->{hours}->[$period]->{humidity} if ($wuData->{days}->[0]->{hours}->[$period]->{humidity} < $rh_min);
+        $rh_max = $wuData->{days}->[0]->{hours}->[$period]->{humidity} if ($wuData->{days}->[0]->{hours}->[$period]->{humidity} > $rh_max); 
+        $meanwindspeed +=  $wuData->{days}->[0]->{hours}->[$period]->{windspeed};
+        print "RH min $rh_min max $rh_max  ws $meanwindspeed\n" if ($debug);
+        
+    }
+
+    my $rh_mean       = ( $rh_min + $rh_max ) / 2;
+    $meanwindspeed = $meanwindspeed / 24;
+    return ( $rh_min, $rh_max, $rh_mean, $meanwindspeed );
 }
 
 # We need to know how much it rained yesterday and how much we watered versus how much we required
@@ -687,7 +790,7 @@ sub mmFromLogs {
     # add all the run times together (a zone can have up to 4 daily runtimes) to get the overall amount of water
     for ( my $x = 0; $x < scalar(@logs); $x++ ) {
         $ydur[ $logs[$x][1] ] += $logs[$x][2];
-        print "[logs[$x][2] = " . $logs[$x][2] . " ydur[$logs[$x][1]] = " . $ydur[ $logs[$x][1] ] . "]\n";
+        print "[logs[$x][2] = " . $logs[$x][2] . " ydur[$logs[$x][1]] = " . $ydur[ $logs[$x][1] ] . "]\n" if ($debug);
     }
 
     for ( my $x = 0; $x < $nStations; $x++ ) {
@@ -887,19 +990,14 @@ sub writewuData {
     my ( $wuData, $noWater, $wuDataPath ) = @_;
     my $fname = int( ( time - ( time % 86400 ) - 1 ) / 86400 );
     if ( open( FILE, ">$wuDataPath/$fname" ) ) {
-        print FILE "observation_epoch, " . $wuData->{current_observation}->{observation_epoch} . "\n";
-        print FILE "weather, " . $wuData->{current_observation}->{weather} . "\n";
-        print FILE "temp_c, " . $wuData->{current_observation}->{temp_c} . "\n";
-        print FILE "temp_f, " . $wuData->{current_observation}->{temp_f} . "\n";
-        print FILE "relative_humidity, " . $wuData->{current_observation}->{relative_humidity} . "\n";
-        print FILE "wind_degrees, " . $wuData->{current_observation}->{wind_degrees} . "\n";
-        print FILE "wind_mph, " . $wuData->{current_observation}->{wind_mph} . "\n";
-        print FILE "wind_kph, " . $wuData->{current_observation}->{wind_kph} . "\n";
-        print FILE "precip_1hr_in, " . $wuData->{current_observation}->{precip_1hr_in} . "\n";
-        print FILE "precip_1hr_metric, " . $wuData->{current_observation}->{precip_1hr_metric} . "\n";
-        print FILE "precip_today_string, " . $wuData->{current_observation}->{precip_today_string} . "\n";
-        print FILE "precip_today_in, " . $wuData->{current_observation}->{precip_today_in} . "\n";
-        print FILE "precip_today_metric, " . $wuData->{current_observation}->{precip_today_metric} . "\n";
+        print FILE "observation_epoch, " . $wuData->{currentConditions}->{datetimeEpoch} . "\n";
+        print FILE "weather, " . $wuData->{currentConditions}->{conditions} . "\n";
+        print FILE "temp, " . $wuData->{currentConditions}->{temp} . "\n";
+        print FILE "relative_humidity, " . $wuData->{currentConditions}->{humidity} . "\n";
+        print FILE "wind_degrees, " . $wuData->{currentConditions}->{winddir} . "\n";
+        print FILE "wind_speed, " . $wuData->{currentConditions}->{windspeed} . "\n";
+        print FILE "precip_chance, " . $wuData->{currentConditions}->{precipprob} . "\n";
+        print FILE "precipitation, " . $wuData->{currentConditions}->{precip} . "\n";
         print FILE "noWater, " . $noWater . "\n";
         close(FILE);
     }
@@ -1068,26 +1166,31 @@ sub main_calc_eto {
     }
 
     # Calculate an adjustment based on predicted rainfall
-    my $tadjust = getForecastData( $wuData->{forecast}->{simpleforecast}->{forecastday} );
-    my $sun     = getAstronomyData( $wuData->{sun_phase} );
+    my $tadjust = getForecastData( $wuData );
+    my $sun     = getAstronomyData( $wuData );
     my ( $todayRain, $noWater, $whyNot ) =
-      getConditionsData( $wuData->{current_observation}, $wuData->{forecast}->{simpleforecast}->{forecastday}[0], $conditions );
+      getConditionsData( $wuData->{currentConditions}, $wuData->{days}[0], $conditions );
 
 ######################## Quick Ref Names For wuData ########################################
-    my $hist = $wuData->{history}->{dailysummary}[0];
+    my $hist = $wuData->{days}[0];
 
 ########################### Required Data ##################################################
     $lat = safe_float($lat);
-    my $tmin          = safe_float( $hist->{mintempm} );
-    my $tmax          = safe_float( $hist->{maxtempm} );
+    my $tmin          = safe_float( $hist->{tempmin} );
+    my $tmax          = safe_float( $hist->{tempmax} );
     my $tmean         = ( $tmin + $tmax ) / 2;
-    my $alt           = safe_float( $wuData->{current_observation}->{display_location}->{elevation} );
-    my $tdew          = safe_float( $hist->{meandewptm} );
-    if ($hist->{date}->{year} == undef || $hist->{date}->{mon} == undef || $hist->{date}->{mday} == undef) {
+    my $alt           = 0 ; #TODOv3 Find Elevation
+    my $tdew          = safe_float( $hist->{dew} );
+
+   my ($cday,$cmon,$cyear) = (localtime($hist->{datetimeEpoch}))[3,4,5];
+    #it looks like a 0 is the same as undef, so if $cmon == 0 then add 1.
+    $cmon++ if ($cmon == 0);    
+
+    if ($cday == undef || $cmon == undef || $cyear == undef) {
         #problem with the data
         my $msg = "[calc_eto] ERROR: Bad Data received from Provider. A date field is empty";
         print_log $msg;
-        my $msg2 = "[calc_eto] ERROR: Undefined Parameter: Year=[$hist->{date}->{year}] Month=[$hist->{date}->{mon}] Day=[$hist->{date}->{mday}]"; 
+        my $msg2 = "[calc_eto] ERROR: Undefined Parameter: Year=[$cyear] Month=[$cmon] Day=[$cday]"; 
         print_log $msg2;
         if ( defined $config_parms{eto_email} ) {
             print_log "[calc_eto] Emailing Error";
@@ -1095,18 +1198,23 @@ sub main_calc_eto {
         }
         return "[[-1,-1,-1,-1],[0]]";    
     }
-    my $doy           = Day_of_Year( $hist->{date}->{year}, $hist->{date}->{mon}, $hist->{date}->{mday} );
-    my $sun_hours     = sun_block( $wuData, $sun->{rise}, $sun->{set}, $conditions );
-    my $rh_min        = safe_float( $hist->{minhumidity} );
-    my $rh_max        = safe_float( $hist->{maxhumidity} );
-    my $rh_mean       = ( $rh_min + $rh_max ) / 2;
-    my $meanwindspeed = safe_float( $hist->{meanwindspdm} );
-    my $rainfall      = min( safe_float( $hist->{precipm} ), safe_float($rainfallsatpoint) );
+    $cmon++ unless ($cmon == 1); #timelocal months start at 0, don't double adjust for january
+    $cyear += 1900;
+    
+    my $doy           = Day_of_Year( $cyear, $cmon, $cday );
+    my $sun_hours     = sun_block( $wuData, ((localtime($wuData->{currentConditions}->{sunriseEpoch}))[2] * 60 + (localtime($wuData->{currentConditions}->{sunriseEpoch}))[1]), ((localtime($wuData->{currentConditions}->{sunsetEpoch}))[2] * 60 + (localtime($wuData->{currentConditions}->{sunsetEpoch}))[1]), $conditions );
+    my ($rh_min, $rh_max, $rh_mean, $meanwindspeed) = getHourlyElements($wuData);
+#    my $rh_min        = safe_float( $hist->{minhumidity} );
+#    my $rh_max        = safe_float( $hist->{maxhumidity} );
+#    my $rh_mean       = ( $rh_min + $rh_max ) / 2;
+#    my $meanwindspeed = safe_float( $hist->{meanwindspdm} );
+    my $rainfall      = min( safe_float( $hist->{precip} ), safe_float($rainfallsatpoint) );
 
 ############################################################################################
 ##                             Calculations                                               ##
 ############################################################################################
     # Calc Rn
+
     print
       "pl1 [lat=$lat,tmin=$tmin,tmax=$tmax,tmean=$tmean,alt=$alt,tdew=$tdew,doy=$doy,shour=$sun_hours,rmin=$rh_min,rmax=$rh_max,$meanwindspeed,$rainfall,$rainfallsatpoint]\n"
       if ($debug);
@@ -1233,12 +1341,12 @@ sub main_calc_eto {
     print_log $msg;
     $msg_string .= $msg . "\n";
 
-    my $stationID = $wuData->{current_observation}->{station_id};
-    $msg = '[calc_eto] RESULTS Weather Station ID:  ' . $stationID;
-    print_log $msg;
-    $msg_string .= $msg . "\n";
+#    my $stationID = $wuData->{current_observation}->{station_id};
+#    $msg = '[calc_eto] RESULTS Weather Station ID:  ' . $stationID;
+#    print_log $msg;
+#    $msg_string .= $msg . "\n";
 
-    my $updateTime = $wuData->{current_observation}->{observation_time};
+    my $updateTime = scalar localtime($wuData->{currentConditions}->{datetimeEpoch});   
     $msg = '[calc_eto] RESULTS Weather data ' . $updateTime;
     print_log $msg;
     $msg_string .= $msg . "\n";
@@ -1264,3 +1372,101 @@ sub main_calc_eto {
     return ($rtime);
 }
 
+sub update_osp_ha_entities {
+    my ($program_string, $retry, $ha_retry_delay) = @_;
+    my $changes = 0;
+ 
+    my ( $run_times, $run_seconds ) = $program_string =~ /\[\[(.*)\],\[(.*)\]\]/;
+    print_log "[calc_eto] Update_osp_ha_entities: Loading values  [$run_times] : [$run_seconds] for $Day into HA Opensprinkler object. $retry Validations remaining";
+
+    #loop through days to set
+    foreach my $d ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday") {
+        my $value = "off";
+        $value = "on" if (lc $Day eq substr $d, 0, 3); #MH just has the first three letters for days 
+        my $state = $osp_ha_object->get_attr($config_parms{eto_HAopensprinkler_program_name} . "_" . $d . '_enabled');
+        $state = "" unless (defined $state);
+        if (lc $state ne lc $value) {
+            print_log '[calc_eto] $osprogram->set_attr("' . $config_parms{eto_HAopensprinkler_program_name} . "_" . $d . '_enabled",' . $value . '); ' if ($debug);
+            $osp_ha_object->set_attr($config_parms{eto_HAopensprinkler_program_name} . "_" . $d . '_enabled' , $value);
+	    $changes++;
+        } else {
+            print_log '[calc_eto] Current value for ' . $config_parms{eto_HAopensprinkler_program_name} . "_" . $d . '_enabled [' . $state . '] matches [' . $value . "] so dont change" if ($debug);
+        }
+    }   
+    
+    #loop through run_times. -1 means disable the start time
+    my $count = 0;    
+    my $program_disabled = 0;
+    foreach my $s ( split /,/,$run_times ) {
+       my $countname = $count;
+       $countname = "" if ($count == 0);
+       my $state = $osp_ha_object->get_attr($config_parms{eto_HAopensprinkler_program_name} . '_start' . $countname . '_time_offset');
+       my $state2 = $osp_ha_object->get_attr($config_parms{eto_HAopensprinkler_program_name} . '_start' . $countname . '_time_offset_type');
+       my $program = state $osp_ha_object;       
+       $state = "" unless (defined $state);
+       $state2 = "" unless (defined $state2);
+
+       if (($s eq "-1") or $program_disabled) { #if the first time is -1, then all times should be disabled.
+            if ($count == 0) {
+                $program_disabled = 1;
+            } else {
+                if (lc $state2 ne "disabled") {
+                    print_log '[calc_eto] $osprogram->set_attr(' . $config_parms{eto_HAopensprinkler_program_name} . '_start' . $countname . '_time_offset_type, "Disabled");' if ($debug) ;
+                    $osp_ha_object->set_attr($config_parms{eto_HAopensprinkler_program_name} . '_start' . $countname . '_time_offset_type', "Disabled");
+		   $changes++;
+                } else {
+                    print_log '[calc_eto] Current value for ' . $config_parms{eto_HAopensprinkler_program_name} . '_start' . $countname . '_time_offset_type [' . $state2 . '] matches [' . $s . "] so dont change" if ($debug);
+                }
+            }
+       } else {
+            if (lc $state2 eq "disabled") {
+                print_log '[calc_eto] $osprogram->set_attr(' . $config_parms{eto_HAopensprinkler_program_name} . '_start' . $countname . '_time_offset_type, "Midnight");' if ($debug);
+                $osp_ha_object->set_attr($config_parms{eto_HAopensprinkler_program_name} . '_start' . $countname . '_time_offset_type', "Midnight");
+           $changes++; 
+	}
+            if (lc $state ne lc $s) {
+                print_log '[calc_eto] $osprogram->set_attr("' . $config_parms{eto_HAopensprinkler_program_name} . '_start' . $countname . '_time_offset", ' . $s . '); ' if ($debug);
+                $osp_ha_object->set_attr($config_parms{eto_HAopensprinkler_program_name} . '_start' . $countname . '_time_offset', $s);
+		$changes++;
+            } else {
+                print_log '[calc_eto] Current value for ' . $config_parms{eto_HAopensprinkler_program_name} . '_start' . $countname . '_time_offset [' . $state . '] matches [' . $s . "] so dont change" if ($debug);
+
+            }
+        }
+        $count++;
+    }
+    
+    #loop through all the durations
+    $count = 0;
+    foreach my $r ( split /,/,$run_seconds) {     
+        $count++;
+        if (exists $config_parms{"eto_ha_s" . $count}) { 
+            my $state = $osp_ha_object->get_attr($config_parms{eto_HAopensprinkler_program_name} . "_" . $config_parms{"eto_ha_s" . $count} . "_station_duration");
+            $state = "" unless (defined $state);
+            my $m = int($r / 60);
+            $m++ if ($r > 0); # add a minute for rounding for non-zero duration stations
+            $m = 0 if ($program_disabled); #turn off all stations just in case
+            if (lc $state ne lc $m) {
+                print_log '[calc_eto] $osprogram->set_attr("' . $config_parms{eto_HAopensprinkler_program_name} . "_" . $config_parms{"eto_ha_s" . $count } . '_station_duration"' . ", $m); " if ($debug);
+                $osp_ha_object->set_attr($config_parms{eto_HAopensprinkler_program_name} . "_" . $config_parms{"eto_ha_s" . $count } . '_station_duration', $m);
+		$changes++;
+            } else {
+                print_log '[calc_eto] Current value for ' . $config_parms{eto_HAopensprinkler_program_name} . "_" . $config_parms{"eto_ha_s" . $count} .'_station_duration [' . $state . '] matches [' . $m . "] so dont change" if ($debug);
+            }
+        } else {
+           print_log 'print_log "[calc_eto] No ha entity name config_param for station ' . $count . '";' if ($debug);
+        }
+     }
+    $retry--;
+    my $eval_string = "&update_osp_ha_entities( '$program_string' , $retry )";
+    if ($changes and $retry) {
+    	print_log "[calc_eto] HA Program: Changes made: $changes. Validation Retries left: $retry";
+        eval_with_timer($eval_string,$ha_retry_delay);
+    } elsif ($changes and !$retry) {
+    	print_log "[calc_eto] HA Program: ERROR Changes made: $changes. No validation retries left, Program incomplete!";
+        net_mail_send( to => $config_parms{eto_email}, subject => "Calc_ETO failed to set HA Program", text => "Program String: $program_string" ) if ($ha_send_email_on_fail);
+    } else {    
+	print_log "[calc_eto] HA Program: SUCCESS Changes made: $changes. Program validated and Ready!";
+    }
+    return;     
+}

@@ -209,6 +209,10 @@ BEGIN {
         # Pick local mh modules first, over any site install ones
         unshift( @INC, "${Pgm_Path}/../lib", "${Pgm_Path}/../lib/site", '.' );
 
+	# Keep fallback versions of CPAN modules, in case they're not present on the system.  Place them last
+	# so the sysadmin can install more current versions in the normal Perl places if they wish.
+	push @INC,"${Pgm_Path}/../lib/fallback";
+
         #       my $pwd=cwd(); print "pwd=$pwd inc=@INC\n";
         #       push (@INC, './../lib', './../lib/site', '.');
         #       push (@INC, './../lib');
@@ -351,6 +355,8 @@ EOF
         for (@parms1) {
             push( @parms2, "$1=s" ) if /^([^\s\#\=]+)\s*=/;
         }
+	my %parmsh = map{ $_, 1} @parms2;
+	@parms2 = keys %parmsh;
         use Getopt::Long;
         if ( !&GetOptions( \%config_parms_startup, "h", "help", "run=s", "run_parms=s", @parms2 )
             or ( $config_parms_startup{h} or $config_parms_startup{help} ) )
@@ -3994,7 +4000,11 @@ sub object_states_save {
     # Save Persistent data
     # Not sure why this does not work ... only the first gets saved??
     #   file_write "$restore_state_file.persistent", Data::Dumper->Dump([\%Persistent, \%Save], [qw(*Persistent *Save)]);
-    file_write "$restore_state_file.persistent", Data::Dumper->Dump( [ \%Persistent ], [qw(*Persistent)] ) . Data::Dumper->Dump( [ \%Save ], [qw(*Save)] );
+    my $d1 = Data::Dumper->new( [ \%Persistent ], [qw(*Persistent)] );
+    $d1->Maxdepth( 0 );
+    my $d2 = Data::Dumper->new( [ \%Save ], [qw(*Save)] );
+    $d2->Maxdepth( 0 );
+    file_write "$restore_state_file.persistent", $d1->Dump() . $d2->Dump();
 
     print " done\n" unless $config_parms{no_log} =~ /save_state/;
 
@@ -4494,7 +4504,28 @@ sub play {
 
 }
 
+
+# 14-jan-2021 new print_log added and old print_log renamed print_log_simple 
+# see https://github.com/hollie/misterhouse/wiki/Developer-help#logging
+
 sub print_log {
+	my ($message,$severity,$source) = @_;
+	if (defined(&print_log_private)) {
+			print_log_private($message,$severity,$source);
+			return;
+	}
+	if (defined($severity)) {
+		$message .=  " " . $severity . ":";
+	}
+	if (defined($source)) {
+		$message .= " [" . $source . "] ";
+	}
+	print_log_simple($message);
+}
+
+
+# renamed from print_log
+sub print_log_simple {
 
     #   my ($data) = @_;
     my $data = "@_";
@@ -4715,7 +4746,7 @@ sub process_external_command {
     $cmd =~ s/^\s+//;                            # Deletes leading blanks
     $cmd =~ s/\s+$//;                            # Deletes trailing blanks
 
-    print "Running external command: $cmd set by $set_by\n"
+    print_log "Running external command: $cmd set by $set_by\n"
       unless $config_parms{no_log} =~ /xcmd/;
 
     if ( &run_voice_cmd( lc($cmd), undef, $set_by, 0, $respond_target ) ) {

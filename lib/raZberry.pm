@@ -1,4 +1,4 @@
-=head1 B<raZberry> v3.0.4
+=head1 B<raZberry> v3.1.0
 
 #test command setup
 #command queue
@@ -122,6 +122,7 @@ raZberry_max_cmd_queue          Maximum number of commands to queue up (default 
 raZberry_com_threshold          Number of failed polls before controller marked offline (default 4)
 raZberry_command_timeout        Number of seconds after a command is issued before it is abandoned (default 60)
 raZberry_command_timeout_limit  Maximum number of retries for a command before abandoned
+raZberry_alt_blind_states       Use open/closed rather than up/down states
 
 =head2 BUGS
 
@@ -186,7 +187,11 @@ sub new {
     my ( $class, $addr, $poll, $options ) = @_;
     my $self = new Generic_Item();
     bless $self, $class;
-    &main::print_log("[raZberry]: v3.0.4 Controller Initializing...");
+    &main::print_log("[raZberry]: v3.0.6 Controller Initializing...");
+    &main::print_log("[raZberry] *******************************************************" );
+    &main::print_log("[raZberry] * Note: raZberry.pm is now depreciated in favour      *");
+    &main::print_log("[raZberry] *       of using Home Assistant for device access     *" );
+    &main::print_log("[raZberry] *******************************************************" );    
     $self->{data}                   = undef;
     $self->{child_object}           = undef;
     
@@ -232,7 +237,7 @@ sub new {
     ( $self->{debug} )              = ( $options =~ /debug=(\d+)/i ) if ( ( defined $options ) and ( $options =~ m/debug=/i ) );
     $self->{debug}                  = $main::Debug{razberry} if ( defined $main::Debug{razberry} );
     $self->{lastupdate}             = undef;
-    $self->{status}                 = "";
+    $self->{status}                 = "online";
     $self->{controller_data}        = ();
     &main::print_log("[raZberry:" . $self->{host} . "]: options are $options") if ( ( $self->{debug} ) and ( defined $options ) );
 
@@ -460,6 +465,10 @@ sub process_check {
             main::print_log( "[raZberry:" . $self->{host} . "] ERROR! bad data returned by poll" );
             main::print_log( "[raZberry:" . $self->{host} . "] ERROR! file data is [$file_data]. json data is [$json_data]" );
             $com_status = "offline";
+            if ($file_data =~ /.*Not logged in 401.*/i){
+                $self->{cookie_jar}->clear();
+                $self->login;
+            }
         } else {
             push @process_data, $json_data;
         }
@@ -496,11 +505,15 @@ sub process_check {
 
     #        print "debug: json_data=$json_data\n" if ( $self->{debug} > 2);
             unless ( ($file_data) and ($json_data) ) {
-                main::print_log( "[raZberry:" . $self->{host} . "] ERROR! bad data returned by poll" );
+                main::print_log( "[raZberry:" . $self->{host} . "] ERROR! bad data returned by command" );
                 main::print_log( "[raZberry:" . $self->{host} . "] ERROR! file data is [$file_data]. json data is [$json_data]" );
                 $com_status = "offline";
                 #update the retry on the failed item.
                 $ {$self->{cmd_queue}}[0][3]++;
+                if ($file_data =~ /.*Not logged in 401.*/i){
+                    $self->{cookie_jar}->clear();
+                    $self->login;
+                }
             } else {
                 push @process_data, $json_data;   
                 shift @{ $self->{cmd_queue} }; #successfully processed to remove item from the queue
@@ -511,20 +524,21 @@ sub process_check {
     
 #check for any queued data that needs to be processed $self->{command_timeout}
     if ((scalar @{ $self->{cmd_queue} }) and ($self->{cmd_process}->done() )) {
-        my ($mode, $get_cmd, $time, $retry) = @ { ${ $self->{cmd_queue} }[0] };
-        #print "****        mode=$mode, get_cmd=$get_cmd\n";
+        my ($mode, $url, $time, $retry) = @ { ${ $self->{cmd_queue} }[0] };
+        #print "****        mode=$mode, url=$url\n";
         #print "***         time=$time, time_diff=" . ($main::Time - $time) ." timeout=" .$self->{command_timeout} . " retry=$retry\n";
         #if there is a retry, then execute at request time + (retry * 5 seconds)
         #discard the command if 60 seconds after the request time
         #if the item is queued then wait until at least a second after the request time
         #discard the item if it's been retried $self->{command_timeout_limit} times
         if ($retry > $self->{command_timeout_limit}) {
-            main::print_log( "[raZberry:" . $self->{host} . "] ERROR: Abandoning command $get_cmd due to $retry retry attempts" );
+            main::print_log( "[raZberry:" . $self->{host} . "] ERROR: Abandoning command $url due to $retry retry attempts" );
             shift @{ $self->{cmd_queue}};        
         } elsif (($main::Time - $time) > $self->{command_timeout}) {
-            main::print_log( "[raZberry:" . $self->{host} . "] ERROR: $get_cmd request older than " . $self->{command_timeout} . " seconds. Abandoning request" );
+            main::print_log( "[raZberry:" . $self->{host} . "] ERROR: $url request older than " . $self->{command_timeout} . " seconds. Abandoning request" );
             shift @{ $self->{cmd_queue}}; 
         } elsif (($main::Time > ($time + 1 + ($retry * 5)) and ($self->{cmd_process}->done() ) )) {#the original time isn't a great base for deep queued commands
+            my $get_cmd = $self->get_cmd_string($url);
             if ($retry == 0) {
                 main::print_log( "[raZberry:" . $self->{host} . "] Command Queue found, processing next item" );
             } else {
@@ -632,11 +646,12 @@ sub process_check {
         if ($com_status eq "online") {
             $self->{com_warning} = 0;
             if (defined $self->{com_poll_interval}) {
-                main::print_log("[RaZberry:" . $self->{host} . "] Valid Data Received. Changing poll rate to $self->{com_poll_interval}.");
+                main::print_log("[RaZberry:" . $self->{host} . "] Valid Data Received. Changing poll rate back to $self->{com_poll_interval}.");
                 $self->{config}->{poll_seconds} = $self->{com_poll_interval};
                 $self->{com_poll_interval} = undef;
                 $self->stop_timer;
                 $self->start_timer;
+                $self->{child_object}->{comm}->set( $com_status, 'poll' );
             }
         } elsif ($com_status eq "offline")  {
             $self->{com_warning}++;
@@ -646,6 +661,8 @@ sub process_check {
                 $self->{config}->{poll_seconds} = 10 unless ($self->{config}->{poll_seconds} <= 10);
                 $self->stop_timer;
                 $self->start_timer;
+                $self->{child_object}->{comm}->set( $com_status, 'poll' );
+
             }
         }
         if ( $self->{status} ne $com_status ) {
@@ -688,7 +705,8 @@ sub poll {
 
 sub set_dev {
     my ( $self, $device, $mode ) = @_;
-
+    &main::print_log("[raZberry:" . $self->{host} . "]: WARNING. Device $device not in raZberry device table. Set operation may not work") unless (defined $self->{data}->{devices}->{$device});
+    
     &main::print_log("[raZberry:" . $self->{host} . "]: set_dev Setting $device to $mode") if ( $self->{debug} );
     my $cmd;
 
@@ -759,11 +777,19 @@ sub update_dev {
 }
 
 #------------------------------------------------------------------------------------
+sub get_cmd_string{
+    my ( $self, $url ) = @_;
+    my $cookie = "";
+    $cookie = $self->{cookie_string} if ( $self->{cookie_string} );
+    my $get_params = "-ua ";
+    $get_params .= "-timeout " . $self->{timeout} . " ";
+    $get_params .= "-cookies " . "'" . $cookie . "' " if ($cookie ne "");
+    return "get_url $get_params $url";
+}
+
 sub _get_JSON_data {
     my ( $self, $mode, $cmd ) = @_;
 
-    my $cookie = "";
-    $cookie = $self->{cookie_string} if ( $self->{cookie_string} );
     my $host   = $self->{host};
     my $port   = $self->{port};
     my $params = "";
@@ -778,10 +804,8 @@ sub _get_JSON_data {
         or ( $mode eq "usercode_data" ) );
     $method = "ZWaveAPI" if ( $mode eq "controller" );
     &main::print_log("[raZberry:" . $self->{host} . "]: contacting http://$host:$port/$method/$rest{$mode}$params") if ( $self->{debug} );
-    my $get_params = "-ua ";
-    $get_params .= "-timeout " . $self->{timeout} . " ";
-    $get_params .= "-cookies " . "'" . $cookie . "' " if ($cookie ne "");
-    my $get_cmd = "get_url $get_params " . '"http://' . "$host:$port/$method/$rest{$mode}$params" . '"';
+    my $url = '"http://' . "$host:$port/$method/$rest{$mode}$params" . '"';
+    my $get_cmd = $self->get_cmd_string($url);
 
     if (( $cmd eq "") or ($cmd =~ m/^\?since=/)) { 
         $self->{poll_process}->stop() unless ($self->{poll_process}->done() );
@@ -796,12 +820,12 @@ sub _get_JSON_data {
             $self->{cmd_process}->start();
             $self->{cmd_process_pid}->{ $self->{cmd_process}->pid() } = $mode;    #capture the type of information requested in order to parse;
             $self->{cmd_process_mode} = $mode; 
-            push @{ $self->{cmd_queue} }, [$mode,$get_cmd,$main::Time,0];           
+            push @{ $self->{cmd_queue} }, [$mode,$url,$main::Time,0];
             main::print_log( "[raZberry:" . $self->{host} . "] Backgrounding Command (" . $self->{cmd_process}->pid() . ") command $mode, $get_cmd" ) if ( $self->{debug} );  
         } else {
             main::print_log( "[raZberry:" . $self->{host} . "] Queing Command command $mode, $get_cmd, time " . $main::Time ) if ( $self->{debug} );  
             if (scalar @{ $self->{cmd_queue} } <= $self->{max_cmd_queue} ) {
-                push @{ $self->{cmd_queue} }, [$mode,$get_cmd,$main::Time,0];
+                push @{ $self->{cmd_queue} }, [$mode,$url,$main::Time,0];
             } else {
                 main::print_log( "[raZberry:" . $self->{host} . "] Max Queue Length ($self->{max_cmd_queue}) reached! Discarding queued command" );  
                 #@{ $self->{cmd_queue} } = ();
@@ -858,7 +882,7 @@ sub register {
     my ( $self, $object, $dev, $options ) = @_;
     if ( lc $dev eq 'comm' ) {
         &main::print_log("[raZberry:" . $self->{host} . "]: Registering Communication object to controller");
-        $self->{child_object}->{'comm'} = $object;
+        $self->{child_object}->{comm} = $object;
     }
     else {
         my $type = $object->{type};
@@ -1237,11 +1261,17 @@ sub new {
     $self->{digital} = 0;
     $self->{digital} = 1
       if ( ( defined $options ) and ( $options =~ m/digital/i ) );
+    my $s_open = 'up';
+    my $s_closed = 'down';
+    if ( defined $main::config_parms{raZberry_alt_blind_states} ) {
+        $s_open = 'open';
+        $s_closed = 'closed';   
+    } 
     if ( $self->{digital} ) {
-        push( @{ $$self{states} }, 'down', '10%', '20%', '30%', '40%', '50%', '60%', '70%', '80%', '90%', 'up' );
+        push( @{ $$self{states} }, $s_closed, '10%', '20%', '30%', '40%', '50%', '60%', '70%', '80%', '90%', $s_open );
     }
     else {
-        push( @{ $$self{states} }, 'down', 'stop', 'up' );
+        push( @{ $$self{states} }, $s_closed, 'stop', $s_open );
     }
     $self->{battery} = 1
       if ( ( defined $options ) and ( $options =~ m/battery/i ) );
@@ -1264,24 +1294,29 @@ sub new {
 
 sub set {
     my ( $self, $p_state, $p_setby ) = @_;
-
+    my $s_open = 'up';
+    my $s_closed = 'down';
+    if ( defined $main::config_parms{raZberry_alt_blind_states} ) {
+        $s_open = 'open';
+        $s_closed = 'closed';   
+    } 
     if ( defined $p_setby && ( ( $p_setby eq 'poll' ) or ( $p_setby eq 'push' ) ) ) {
         $self->{level} = $p_state;
         my $n_state;
         if ( $p_state == 0 ) {
-            $n_state = "down";
+            $n_state = $s_closed;
         }
         else {
             if ( $self->{digital} ) {
                 if ( $p_state >= 99 ) {
-                    $n_state = "up";
+                    $n_state = $s_open;
                 }
                 else {
                     $n_state = "$p_state%";
                 }
             }
             else {
-                $n_state = "up";
+                $n_state = $s_open;
             }
         }
 
@@ -1292,10 +1327,10 @@ sub set {
     }
     else {
         if ( $self->{digital} ) {
-            if ( lc $p_state eq "down" ) {
+            if ( lc $p_state eq $s_closed ) {
                 $$self{master_object}->set_dev( $$self{devid}, $p_state );
             }
-            elsif ( lc $p_state eq "up" ) {
+            elsif ( lc $p_state eq $s_open ) {
                 $$self{master_object}->set_dev( $$self{devid}, "level=100" );
             }
             elsif ( ( $p_state eq "100%" ) or ( $p_state =~ m/^\d{1,2}\%$/ ) ) {
@@ -1306,8 +1341,8 @@ sub set {
                 main::print_log("[raZberry_blind] Error. Unknown set state $p_state");
             }
         }
-        elsif (( lc $p_state eq "up" )
-            or ( lc $p_state eq "down" )
+        elsif (( lc $p_state eq $s_open )
+            or ( lc $p_state eq $s_closed )
             or ( lc $p_state eq "stop" ) )
         {
             $$self{master_object}->set_dev( $$self{devid}, $p_state );
@@ -1653,7 +1688,7 @@ sub new {
     $$self{master_object} = $object;
     push( @{ $$self{states} }, 'online', 'offline' );
     $object->register( $self, 'comm' );
-#    $self->SUPER::set('online'); #start online at initialization
+    $self->SUPER::set('online'); #start online at initialization
     return $self;
 
 }
@@ -1694,10 +1729,10 @@ sub new {
     }
 
     $$self{master_object} = $object;
-    $devid = $devid . "-0-67" if ( $devid =~ m/^\d+$/ );
-    #check if the thermostat is a subitem? ie xx-0-67-1, which happened on 2.3.5?
-    my $testdev = $devid . "-1";
-    $devid = $testdev if (defined $$self{master_object}->{data}->{devices}->{$testdev});
+    $devid = $devid . "-0-67-1" if ( $devid =~ m/^\d+$/ );
+    ##check if the thermostat is a subitem? ie xx-0-67-1, which happened on 2.3.5?
+    #my $testdev = $devid . "-1";
+    #$devid = $testdev if (defined $$self{master_object}->{data}->{devices}->{$testdev});
     $$self{devid} = $devid;
     $$self{type}  = "Thermostat";
 
@@ -2184,6 +2219,12 @@ sub update_data {
 
 # ZWayVDev_zway_18-0-113-8-1-A
 =head2 CHANGELOG 
+v3.1.0
+- raZberry_alt_blind_states config variable to have blinds open/closed instead of up/down to match HA
+
+v3.0.7 
+- fixed offline polling for push operation
+
 v3.0
 - added 3 10 second check on push mode status pull
 - use process_item to prevent pauses

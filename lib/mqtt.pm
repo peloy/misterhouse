@@ -40,12 +40,22 @@ License:
 
 Usage:
 
+    ######################
+    NOTES: mqtt_Item and MQTT_DEVICE are older technology.  They implement essentially a 1-1
+           object to mqtt message model.
+
+	   SEE mqtt_items.pm for MH item implementations where the MH item handles all messages
+	   for an mqtt device.  mqtt_items.pm uses the same mqtt server object.  See documentation
+	   in mqtt_items.pm.
+
+    ######################
+
     .mht file:
 
         # MQTT stuff
         CODE, require mqtt; #noloop
         #
-        CODE, $mqtt_1 = new mqtt('mqtt_1', '127.0.0.1', 1883, 'home/ha/#', "", "", 121);
+        CODE, $mqtt_1 = new mqtt('mqtt_1', '127.0.0.1', 1883, 'home/ha/#', "", "", 121, 'use_ha_device_disc=1');
         CODE, $mqtt_2 = new mqtt('mqtt_2', 'test.mosquitto.org', 1883, 'home/test/#', "", "", 122);
         CODE, $mqtt_3 = new mqtt('mqtt_3', '127.0.0.1', 1883, 'home/network/#', "", "", 122); #noloop
         #
@@ -64,7 +74,7 @@ Usage:
             my $state = ('on' eq state $M2_Temp) ? 'off' : 'on';
             set $M2_Temp $state;
             my $remark = "M2 Light set to $state";
-            print_log "$remark";
+            &print_log( "$remark" );
         }
 
     CLI generation of a command to the CR_Temp
@@ -72,8 +82,20 @@ Usage:
         mosquitto_pub -d -h test.mosquitto.org -q 0 -t test.mosquitto.org/test/x10/1 -m "Off"
 
 Example initialization:
+    This accepts multiple calling formats using either positional or named parameters.
+    When using positional parameters, the first seven parameters are required and in
+    fixed positions, followed by any optional parameters in a named format, as follows:
 
-    $myMQTT = new mqtt("MQTT",<host>,<port>,<topic>,<user>,<password>,<keepalive>);
+        $myMQTT = new mqtt(<name>,<host>,<port>,<topic>,<user>,<password>,<keepalive>, opt1=>value1, opt2=>value2...);
+
+    Alternatively, all parameters after the instance name can be named in a "keyword=>value" format. Valid 
+    keywords are:
+
+        host, port, topic, user, password, keepalive, use_ha_device_disc, topic_prefix
+
+    Example:
+
+        $myMQTT = new mqtt(<name>,host=><host>,port=><port>,topic=><topic>,user=><user>,password=><password>,keepalive=><keepalive>, opt1=>value1, opt2=>value2...);
 
 Notes:
     - 
@@ -184,23 +206,60 @@ use IO::Socket::INET;
 
 use Time::HiRes;
 
-#use JSON qw( decode_json );     #
-
 use Data::Dumper;
 
 eval "use bytes";    # Not on all installs, so eval to avoid errors
 
+eval "use Digest::MD5 qw(md5_hex)";    # Not sure if this is on all installs, so eval to avoid errors
+
 # Need to share this with the outside world
-my $buf    = '';
 my $msg_id = 1;
+my $blocking_read_timeout = .5;
 
 my %MQTT_Data;
+my $init_global_v_cmd = 0;
 
-#$main::Debug{mqtt} = 1;
+# $main::Debug{mqtt} = 0;
 
 # ------------------------------------------------------------------------------
 sub dump() {
     &main::print_log( "*** mqtt Dumper (MQTT_Data):\n" . Dumper( \%MQTT_Data ) . "***" );
+}
+
+sub log {
+    my ($self, $str, $prefix) = @_;
+    my $maxlength = 300;
+
+    $prefix = $prefix || '[MQTT]: ';
+    while( length( $str ) > $maxlength ) {
+	my $l = 0;
+	my $i;
+	for( $i=0; $i<length($str) && $l<$maxlength; ++$i,++$l ) {
+	    if( substr( $str, $i, 1 ) eq "\n" ) {
+		$l = 0;
+	    }
+	}
+	&main::print_log( $prefix . substr($str,0,$i) );
+	$str = substr( $str, $i );
+
+	# 2024-12: After first pass, add '....  ' once to indicate cont. line. Keep the
+	# original prefix so any log scanning programs have context. -BPM
+	$prefix .= '....  ' if ($prefix !~ /\.\.\.\.  $/);
+    }
+    &main::print_log( $prefix . $str );
+}
+
+sub debug {
+    my( $self, $level, $str ) = @_;
+    if( $main::Debug{mqtt} >= $level ) {
+	$level = 'D' if $level == 0;
+	&mqtt::log( $self, $str, "[MQTT D$level]: " );
+    }
+}
+
+sub error {
+    my ($self, $str, $level ) = @_;
+    &mqtt::log( $self, $str, "[MQTT ERROR]: " );
 }
 
 # ------------------------------------------------------------------------------
@@ -211,57 +270,59 @@ sub dump() {
 sub mqtt_connect() {
     my ($self) = @_;
 
-    &main::print_log("*** mqtt mqtt_connect Socket ($$self{host}:$$self{port},$$self{keep_alive_timer}) ") if ( $main::Debug{mqtt} );
+    $self->log( "$self->{instance} connecting to ($$self{host}:$$self{port},$$self{keep_alive_timer}) Topic ($$self{topic}) ");
 
     ### 1) open a socket (host, port and keepalive
     my $socket = IO::Socket::INET->new(
         PeerAddr => $self->{host} . ':' . $self->{port},
-        Timeout  => $self->{keep_alive_timer},
+        Timeout => 2,
+        # Timeout  => $self->{keep_alive_timer},
     );
 
     # Can't use this at this time
     # $socket = new main::Socket_Item(undef, undef, "$host:$port", $instance);
 
-      if ( !defined($socket) ) {
+    if ( !defined($socket) ) {
         if ($$self{recon_timer}->inactive) {
-            ::print_log("*** mqtt connection for $$self{instance} failed, I will try to reconnect in 20 seconds");
+            $self->debug( 1, "mqtt connection for $$self{instance} failed, will try to reconnect in 20 seconds");
             my $inst = $$self{instance};
-            $$self{recon_timer}->set(20, sub { $MQTT_Data{$inst}{self}->mqtt_connect() });
+            $$self{recon_timer}->set( 20, sub { $MQTT_Data{$inst}{self}->mqtt_connect() } );
             return;
         }
-      }
-
-	
+    }
 
     $self->{socket}            = $socket;
     $self->{got_ping_response} = 1;
-    $self->{next_ping}         = $self->{keep_alive_timer};
+    $self->{ping_missed_count} = 0;
+    $self->{next_ping}         = Time::HiRes::time + $$self{keep_alive_timer};
+    $self->{buf}	       = '';
 
     # --------------------------------------------------------------------------
     ### 2) Send MQTT_CONNECT
+    # 20-12-2020 added registration of mqtt Last Will and Testament if defined in mh.ini
     $self->send_mqtt_msg(
         message_type     => MQTT_CONNECT,
+        client_id        => "misterhouse_$$",
         keep_alive_timer => $self->{keep_alive_timer},
-        ,
-        user_name => $self->{user_name},
-        password  => $self->{password}
+	user_name	 => $self->{user_name},
+	password	 => $self->{password},
+	will_topic	 => $::config_parms{mqtt_LWT_topic},
+	will_message	 => $::config_parms{mqtt_LWT_payload}
     );
 
     ### 3) Check for ACK or fail
-    &main::print_log( "*** mqtt Socket check ($$self{keep_alive_timer}) [ $! ]: " . ( $self->isConnected() ? "Connected" : "Failed" ) )
-      if ( $main::Debug{mqtt} );
+    $self->debug( 1, "$self->{instance} socket check ($$self{keep_alive_timer}): " . ( $self->isConnected() ? "Connected" : "Failed [ $! ]" ) );
 
-    my $msg = read_mqtt_msg_timeout( $self, $buf );
+    my $msg = $self->read_mqtt_msg( $blocking_read_timeout );
     if ( !$msg ) {
-        &main::print_log("XXX mqtt $$self{instance} No ConnAck ");
+        $self->error("mqtt $$self{instance} No ConnAck ");
 
         #exit 1;
         return;
     }
 
     # We should actually get a SubAck but who is checking (yes, I know I should)
-    &main::print_log( "*** mqtt $$self{instance} Received: " . $msg->string )
-      if ( $main::Debug{mqtt} );
+    $self->debug( 1, "$$self{instance} Received: " . $msg->string );
 
     ### 4) Send a subscribe '#' (we'll have many of these, one for each device)
     ###    I don't know if this is a good idea or not but that's what I intend to do for now
@@ -272,8 +333,10 @@ sub mqtt_connect() {
     );
 
     ### 5) Check for ACK or fail
-    $msg = $self->read_mqtt_msg_timeout($buf)
-      or &main::print_log( "*** mqtt $$self{instance} Received: " . "No SubAck" );
+    $msg = $self->read_mqtt_msg( $blocking_read_timeout );
+    if( !$msg ) {
+        $self->log( "$$self{instance} Received: " . "No subscription Ack" );
+    }
     if ( $main::Debug{mqtt} ) {
         my $s =
           defined( $$msg{string} )
@@ -282,12 +345,14 @@ sub mqtt_connect() {
         ###
         ### IF we're not getting $$msg{string} then what are we getting ?
         ###
-        &main::print_log( "*** mqtt $$self{instance} Sub 1 Received: " . "$s" );    # @FIXME: Use of uninitialized value
+        $self->log( "$$self{instance} Subscription 1 ($$self{topic}) acknowledged: " . "$s" );    # @FIXME: Use of uninitialized value
     }
 
     ### 6) check for data
-    &main::print_log("*** mqtt $$self{instance} Initializing MQTT connection ...")
-      if ( $main::Debug{mqtt} );
+    $self->debug( 1, "$$self{instance} Initializing MQTT connection ...");
+
+    $self->set( 'on', 'mqtt::mqtt_connect' );	# 2024-12: Replaced hex hash address with descriptive text in 2nd field.-BPM
+
 }
 
 # ------------------------------------------------------------------------------
@@ -297,7 +362,7 @@ sub mqtt_connect() {
 
 sub isConnected {
     my ($self) = @_;
-    unless( defined($$self{socket}) ) { return 0 }
+    unless ( defined($$self{socket} ) ) { return 0 }
     return $$self{socket}->connected;
 }
 
@@ -308,7 +373,7 @@ sub isConnected {
 
 sub isNotConnected {
     my ($self) = @_;
-    unless( defined($$self{socket}) ) { return 1 }
+    unless ( defined($$self{socket} ) ) { return 1 }
     return !$$self{socket}->connected;
 }
 
@@ -321,21 +386,43 @@ sub isNotConnected {
 =cut
 
 sub new {
-    my ( $class, $instance, $host, $port, $topic, $user, $password, $keep_alive_timer ) = @_;
+    my $class = shift;
 
-    my $self = {};
+    my $positional_parms = [ qw (name host port topic username password keepalive) ];
+    my $extra_keyword_parms = [ qw (topic_prefix use_ha_device_disc) ];
+    my $parms = main::parse_table_parms( $positional_parms, $extra_keyword_parms, [@_] );
 
+    if( !ref $parms ) {
+	&mqtt::error( undef, "error parsing mqtt parameters: $parms -- mqtt object not created" );
+	return;
+    }
+
+    my $self;
+
+    if( !defined( $main::Debug{mqtt} ) ) {
+	$main::Debug{mqtt} = 0;
+    }
+
+    # 20-12-2020 edit to enable MH to monitor all mqtt topics especially for wildcards e.g. LWT
+    $parms->{topic}	= $parms->{topic}		|| $::config_parms{mqtt_topic}		|| '#';
+    $parms->{host}	= $parms->{host}		|| $::config_parms{mqtt_host}		|| '127.0.0.1';
+    $parms->{port}	= $parms->{port}		|| $::config_parms{mqtt_port}		|| 1883;
+    $parms->{user}	= $parms->{user}		|| $::config_parms{mqtt_username}	|| '';
+    $parms->{password}	= $parms->{password}	|| $::config_parms{mqtt_password}	|| '';
+
+    $parms->{keepalive} = 120 if !defined( $parms->{keepalive} );    # retain a provided 0
+   
     # If we have already created a socket and have an existing instance then
     # return the existing instance. MQTT doesn't like having 2 sockets to the
     # same server and will close the old socket.
     # But what should I do about the new topic. I'll need to subscribe to the
     # topic before returning the existing instance
     foreach my $inst ( keys %MQTT_Data ) {
-        if ( "$MQTT_Data{$inst}{self}{host}" eq "$host" ) {
-            if ( "$MQTT_Data{$inst}{self}{port}" eq "$port" ) {
+        if ( "$MQTT_Data{$inst}{self}{host}" eq "$parms->{host}" ) {
+            if ( "$MQTT_Data{$inst}{self}{port}" eq "$parms->{port}" ) {
 
                 # subscribe to the topic if it doesn't already exist
-                if ( "$MQTT_Data{$inst}{self}{topic}" ne "$topic" ) {
+                if ( "$MQTT_Data{$inst}{self}{topic}" ne "$parms->{topic}" ) {
 
                     # Old, existing instace with the same host and port info
                     $self = $MQTT_Data{$inst}{self};
@@ -345,19 +432,21 @@ sub new {
                         $self,
                         message_type => MQTT_SUBSCRIBE,
                         message_id   => $msg_id++,
-                        topics       => [ map { [ $_ => MQTT_QOS_AT_MOST_ONCE ] } $topic ]
+                        topics       => [ map { [ $_ => MQTT_QOS_AT_MOST_ONCE ] } $parms->{topic} ]
                     );
 
                     ### 5) Check for ACK or fail
-                    $buf = '';
-                    my $msg = read_mqtt_msg( $self, $buf )
-                      or &main::print_log( "*** mqtt $$self{instance} Received: " . "No SubAck" );
-                    &main::print_log( "*** mqtt $inst Sub 2 Received: " . $msg->string )
-                      if ( $main::Debug{mqtt} );
+                    $self->{buf} = '';
+		    my $msg = $self->read_mqtt_msg( $blocking_read_timeout );
+		    if( !$msg ) {
+			$self->log( "$inst Received: " . "No Subscription Ack" );
+		    } else {
+			$self->log( 1, "$inst Subscription 2 ($parms->{topic}) acknowledged: " . $msg->string );
+		    }
                 }
 
                 # This is the little messages that appear when MH starts
-                &main::print_log("*** Reusing $inst (instead of $instance) on $host:$port $topic");
+                &mqtt::log( undef, "Reusing $inst (instead of $parms->{name}) on $parms->{host}:$parms->{port} $parms->{topic}");
 
                 ###
                 ### Ran into an issue doing it this way, it renames the object to the last
@@ -370,70 +459,87 @@ sub new {
         }
     }
 
-    # This is the little messages that appear when MH starts
-    &main::print_log("*** Creating $instance on $host:$port $topic");
+    $self = {};
+    bless $self, $class;
 
-    $$self{state}     = 'off';
-    $$self{said}      = '';
-    $$self{state_now} = 'off';
+    $$self{state}		= 'off';
+    $$self{said}		= '';
+    $$self{state_now}		= 'off';
 
-    @{ $$self{command_stack} } = ();
+    $self->{command_stack}	= [];
+    $self->{retained_topics}	= {};
 
-    $$self{instance} = $instance;
-    $$self{recon_timer} = ::Timer::new();
-    $$self{host} = "$host" || "127.0.0.1";
-    $$self{port} = $port   || 1883;
-
-    # Use the wildcard here, not in the mqtt_Item
-    $$self{topic} = "$topic" || "home/ha/#";
-
-    # Currently not used
-    $$self{user_name} = "$user" || "";
-
-    # Currently not used
-    $$self{password}         = "$password"       || "";
-    $$self{keep_alive_timer} = $keep_alive_timer || 120;
+    $$self{instance}		= $parms->{name};
+    $$self{recon_timer}		= ::Timer::new();
+    $$self{host}		= $parms->{host};
+    $$self{port}		= $parms->{port};
+    $$self{topic}		= $parms->{topic};
+    $$self{user_name}		= $parms->{username};
+    $$self{password}		= $parms->{password};
+    $$self{keep_alive_timer}	= $parms->{keepalive};
+    $$self{use_ha_device_disc}	= 0;
 
     #
-    $$self{next_ping}         = 0;
-    $$self{got_ping_response} = 1;    # We really don't use this (yet)
+    if (defined($parms->{use_ha_device_disc}) ) {
+    	$$self{use_ha_device_disc} = $parms->{use_ha_device_disc};
+    }
+    if (defined($parms->{topic_prefix})) {
+	$$self{topic_prefix} = $parms->{topic_prefix};
+    }
 
-    bless $self, $class;
+    $$self{init_v_cmd}		= 0;
+    $$self{next_ping}		= 0;
+    $$self{got_ping_response}	= 1; 
+    $$self{ping_missed_count}	= 0;
+
+    # This is the little messages that appear when MH starts
+    $self->log("Creating $parms->{name} on $parms->{host}:$parms->{port} topic:$parms->{topic}");
 
     $self->set_states( "off", "on" );
 
-    $MQTT_Data{$instance}{self} = $self;
+    $MQTT_Data{$parms->{name}}{self} = $self;
 
-    if ( $main::Debug{mqtt} ) {
-        &main::print_log("*** Opening MQTT ($instance) connection to $$self{host}/$$self{port}/$$self{topic}");
-        &main::print_log("*** Host       = $$self{host}");
-        &main::print_log("*** Port       = $$self{port}");
-        &main::print_log("*** Topic      = $$self{topic}");
-        &main::print_log("*** User       = $$self{user_name}");
-        &main::print_log("*** Password   = $$self{password}");
-        &main::print_log("*** Keep Alive = $$self{keep_alive_timer}");
-    }
+    $self->debug(1, "Opening MQTT ($parms->{name}) connection to $$self{host}/$$self{port}/$$self{topic}");
+    $self->debug(1, "    Host       = $$self{host}");
+    $self->debug(1, "    Port       = $$self{port}");
+    $self->debug(1, "    Topic      = $$self{topic}");
+    $self->debug(1, "    User       = $$self{user_name}");
+    $self->debug(1, "    Password   = ***" .
+        (
+              exists($INC{'Digest/MD5.pm'})
+            ? "MD5:" . md5_hex($$self{password})
+            : '[masked]'
+	)
+    );
+    $self->debug(1, "    Keep Alive             = $$self{keep_alive_timer}");
+    $self->debug(1, "    Use HA Device Discovery= $$self{use_ha_device_disc}");
+    $self->debug(1, "    Topic Prefix           = $$self{topic_prefix}");
+
     ### ------------------------------------------------------------------------
     $self->mqtt_connect();
 
     unless ($self) { 
-    	&main::print_log("\n***\n*** Hmm, this is not good!, can't find myself\n***\n");
+    	$self->error("\n***\n*** Hmm, this is not good!, can't find myself\n***\n");
     	return;
     }
 
     # Hey what happens when we fail ?
-    #$MQTT_Data{$instance}{self} = $self;
+    #$MQTT_Data{$parms->{name}}{self} = $self;
     if ( 1 == scalar( keys %MQTT_Data ) ) {    # Add hooks on first call only
-        &main::print_log("*** mqtt added MQTT check_for_data ...");
+        $self->log("added MQTT check_for_data ...");
         &::MainLoop_pre_add_hook( \&mqtt::check_for_data, 1 );
     }
     else {
-        #&main::print_log ("*** mqtt already added MQTT poll ..." . scalar(keys %MQTT_Data) );
-        #&main::print_log ("*** mqtt already added MQTT poll ... but that's okay" );
+        #$self->log("already added MQTT poll ..." . scalar(keys %MQTT_Data) );
+        #$self->log("already added MQTT poll ... but that's okay" );
         #exit 1;
     }
 
-    $self->set( 'on', $self );
+    #  $self->set( 'on', $self );
+
+    &::Reload_post_add_hook( \&mqtt::generate_voice_commands, 1, $self );
+    &::Reload_post_add_hook( \&mqtt::create_discovery_data, 1, $self );
+
     return $self;
 }
 
@@ -447,8 +553,13 @@ sub new {
 =cut
 
 my @outqueue = ();    # Queue of messages to be sent
+my $check_for_data_first = 1;
 
 sub check_for_data {
+    if( $check_for_data_first ) {
+	$check_for_data_first = 0;
+	mqtt->log( "now checking for new data" );
+    }
     foreach my $inst ( keys %MQTT_Data ) {
         my $self = $MQTT_Data{$inst}{self};
 
@@ -461,33 +572,28 @@ sub check_for_data {
             ###
             ### @FIXME: failed connection
             if ( 'off' ne $self->{state} ) {
+		my $inst = $self->{instance};
 
 		if ($$self{recon_timer}->inactive) {
-            		::print_log("*** mqtt $inst connection failed ($$self{host}/$$self{port}/$$self{topic}), I will try to reconnect in 20 seconds");
+            		$self->log("$inst connection failed ($$self{host}/$$self{port}/$$self{topic}), I will try to reconnect in 20 seconds");
             		$$self{recon_timer}->set(20, sub { $MQTT_Data{$inst}{self}->mqtt_connect() });
 		}
 
                 # check the state to see if it's off already
 
-=begin comment
-03/29/15 11:17:47 AM *** mqtt mqtt_4 failed (m11.cloudmqtt.com/15050/home/network/#)
-03/29/15 11:17:47 AM *** mqtt mqtt set mqtt_4: [(off), undefined set_by, $mqtt_4]
-03/29/15 11:17:47 AM *** mqtt mqtt set mqtt_4: isa mqtt
-=cut
-
-                $self->set( 'off', $self );
+                $self->set( 'off', 'mqtt::check_for_data' );	# 2024-12: Replaced hex object address with descriptive text in 2nd field.-BPM
             }
 
             # Skip if we're not connected
             next;
         }
 
-        # This one doesn't block
-        my $msg = read_mqtt_msg( $self, $buf );
-
         ### -[ Input ]----------------------------------------------------------
 
-        if ($msg) {
+        # This one doesn't block
+        my $msg;
+
+	while( $msg = $self->read_mqtt_msg( 0 ) ) {
             ###
             ### Okay this is the hard part
             ### For now I'm only worried about data that fits into 1 read
@@ -502,10 +608,8 @@ sub check_for_data {
                 ###
                 ### Someone published something, deal with it
                 ###
-                if ( $main::Debug{mqtt} ) {
-                    &main::print_log( "*** mqtt $inst check_for_data rcv'd: T:" . $msg->topic, ", M:", $msg->message );
-                    &main::print_log( "*** mqtt $inst check_for_data rcv'd: S:" . $msg->string . "," );
-                }
+		$self->debug( 1, "$inst Rcv'd: R:$$msg{retain} T:'$$msg{topic}' M:'$$msg{message}'"  );
+		# $self->debug( 1, "$inst Rcv'd: S:'" . $msg->string . "'", 3 );
 
                 ###
                 ### So we want the topic and the message
@@ -519,14 +623,13 @@ sub check_for_data {
             }
             elsif ( $msg->message_type == MQTT_PINGRESP ) {
                 $$self{got_ping_response} = 1;
-                &main::print_log( "*** mqtt $inst check_for_data Ping rcvd: " . $msg->string )
-                  if ( $main::Debug{mqtt} );
+                $self->debug( 2, "$inst check_for_data Ping rcvd" );
+                $self->debug( 3, "Ping msg: " . Dumper( $msg ) );
             }
             else {
                 # "$msg->string"
                 # Net::MQTT::Message::SubAck=HASH(0x2da94e0)->string
-                &main::print_log( "*** mqtt $inst check_for_data Received: " . $msg->string )
-                  if ( $main::Debug{mqtt} );
+                $self->debug( 1, "$inst check_for_data UNHANDLED MQTT MESSAGE Received: " . Dumper( $msg ) );
             }
         }
 
@@ -543,7 +646,7 @@ sub check_for_data {
 	    ### Okay this is the other hard part
 	    ### 
 	    #send_mqtt_msg($mref));
-	    &main::print_log ("*** mqtt $inst check_for_data send_mqtt_msg $mref ") if ($main::Debug{mqtt});
+	    $self->debug( 1, "$inst check_for_data send_mqtt_msg $mref ");
 	}
 =cut
 
@@ -554,19 +657,23 @@ sub check_for_data {
         ###
         # Ping check
         if ( Time::HiRes::time > $$self{next_ping} ) {
-            ###
-            ### We've exceeded the ping time
-            ###
-            &main::print_log("*** mqtt $inst read_mqtt_msg Ping Response timeout.")
-              unless ( $$self{got_ping_response} );
-            ###
-            ### This has confused me, I'm not certain if I should put it back in or not
-            ### I'll need to sit down a put together a state table and review this
-            ###
-            # return unless ($$self{got_ping_response});
+	    if( $self->{got_ping_response} ) {
+		$self->{ping_missed_count} = 0;
+	    } else {
+		###
+		### We've exceeded the ping time
+		###
+		$self->{ping_missed_count} += 1;
+		$self->log("$inst check_for_data Ping Response timeout.");
+		if( $self->{ping_missed_count} >= 4 ) {
+		    $self->log("$inst check_for_data Ping Response threshold exceeded.");
+		    shutdown( $self->{socket}, 2 );
+		    $self->{socket} = undef;
+		    # check_for_data will reconnect socket
+		}
+	    }
 
-            &main::print_log("*** mqtt $inst read_mqtt_msg Ping Request")
-              if ( $main::Debug{mqtt} );
+            $self->debug( 2, "$inst read_mqtt_msg Ping Request" );
             send_mqtt_msg( $self, message_type => MQTT_PINGREQ );
             $$self{got_ping_response} = 0;
         }
@@ -579,12 +686,16 @@ sub check_for_data {
 =cut
 
 sub send_mqtt_msg {
-    my $self = shift;
+    my ( $self, %p_objects ) = @_;
 
-    my $msg = Net::MQTT::Message->new(@_);
+    my $msg = Net::MQTT::Message->new(%p_objects);
     $msg = $msg->bytes;
 
+    # print( "writing to mqtt socket '$msg'\n" );
     # syswrite ?
+    if( !defined $$self{socket} ) {
+	return;
+    }
     syswrite $$self{socket}, $msg, length $msg;
 
     # Reset the next_ping timer (we sent something so we don't need another ping
@@ -598,92 +709,53 @@ sub send_mqtt_msg {
 =cut
 
 sub read_mqtt_msg {
-    my $self = shift;
+    my ($self, $timeout) = @_;
 
     my $select  = IO::Select->new( $$self{socket} );
-    my $timeout = $$self{next_ping} - Time::HiRes::time;
+    if( !defined $timeout ) {
+	$timeout = 0;
+    }
 
     do {
         ###
         ### I really need to sit down and figure this out
         ###
-        my $mqtt = Net::MQTT::Message->new_from_bytes( $_[0], 1 );
+        my $mqtt = Net::MQTT::Message->new_from_bytes( $self->{buf}, 1 );
         #
         # I am a little confused by this
         #
-        return $mqtt if ( defined $mqtt );
+	if( defined $mqtt ) {
+	    # print( "read_mqtt_msg $self->{instance} returning a message -- remaining buffer '$self->{buf}'\n" );
+	    return $mqtt;
+	}
 
-        ### very short wait
-        ### Return if there is no data
-        $select->can_read(0.1) || return;
-
-        #
-        $timeout = $$self{next_ping} - Time::HiRes::time;
+        ### Return if there is no data within the alloted time
+        $select->can_read($timeout) || return;
 
         # can return undef (error) or 0 bytes (eof)
-        my $bytes = sysread $$self{socket}, $_[0], 2048, length $_[0];
+        my $bytes = sysread $self->{socket}, $self->{buf}, 2048, length $self->{buf};
 
         # We get no bytes if there is an error or the socket has closed
         unless ($bytes) {
 	    my $inst = $$self{instance};
             if ($$self{recon_timer}->inactive) {
-		 ::print_log( "*** mqtt $$self{instance}: read_mqtt_msg Socket closed " . ( defined $bytes ? 'gracefully ' : "with error [ $! ]" ) );
-		 ::print_log( "*** mqtt instance $$self{instance} will try to reconnect in 20 seconds");
+		 $self->log( "$$self{instance}: read_mqtt_msg Socket closed " . ( defined $bytes ? 'gracefully ' : "with error [ $! ]" ) );
+		 $self->log( "This could be caused by sending an ill formed mqtt message, and the broker closed the socket" );
+		 $self->log( "instance $$self{instance} will try to reconnect in 20 seconds");
 		 $$self{recon_timer}->set(20, sub { $MQTT_Data{$inst}{self}->mqtt_connect() });
 	    }
 
             # Not a permanent solution just a way to keep debugging
-            #&main::print_log( "*** mqtt deleting $$self{instance}\n" . Dumper( \$self ) )
-            #  if ( $main::Debug{mqtt} );
+            #$self->debug( "1, deleting $$self{instance}\n" . Dumper( \$self ) );
             #delete( $MQTT_Data{ $$self{instance} } );
 
             return;
         }
-    } while ( $timeout > 0 );
+    } while ( 1 );
 }
 
 # ------------------------------------------------------------------------------
 
-=item C<read_mqtt_msg_timeout()>
-=cut
-
-sub read_mqtt_msg_timeout {
-    my $self = shift;
-
-    my $select  = IO::Select->new( $$self{socket} );
-    my $timeout = $$self{next_ping} - Time::HiRes::time;
-
-    do {
-        my $mqtt = Net::MQTT::Message->new_from_bytes( $_[0], 1 );
-
-        return $mqtt if ( defined $mqtt );
-
-        ###
-        ### This is where it waits (blocking)
-        ###
-        $select->can_read($timeout) || return;
-
-        #
-        $timeout = $$self{next_ping} - Time::HiRes::time;
-
-        # can return undef (error) or 0 bytes (eof)
-        my $bytes = sysread $$self{socket}, $_[0], 2048, length $_[0];
-
-        # We get no bytes if there is an error or the socket has closed
-        unless ($bytes) {
-            &main::print_log( "*** mqtt $$self{instance}: read_mqtt_msg Socket closed " . ( defined $bytes ? 'gracefully ' : "with error [ $! ]" ) );
-
-            # Not a permanent solution just a way to keep debugging
-            &main::print_log( "*** mqtt deleting $$self{instance}\n" . Dumper( \$self ) )
-              if ( $main::Debug{mqtt} );
-            delete( $MQTT_Data{ $$self{instance} } );
-
-            return;
-        }
-    } while ( $timeout > 0 );
-}
-
-# ------------------------------------------------------------------------------
 
 =item C<set()>
 =cut
@@ -693,14 +765,14 @@ sub set {
 
     if ( $main::Debug{mqtt} ) {
         my $xStr = defined($msg) ? "($msg)" : "undefined message";
-        $xStr .= defined($set_by) ? ", ($set_by)" : ", undefined set_by, Obj: ";
-        $xStr .= defined($$self{object_name}) ? ", $$self{object_name}" : ", undefined object_name";    # @FIXME: Use of uninitialized value
+        $xStr .= defined($set_by) ? ", (setby:$set_by)" : ", undefined set_by, Obj: ";
+        $xStr .= defined( $$self{object_name} ) ? ", $$self{object_name}" : ", undefined object_name"; 
 
-        &main::print_log("*** mqtt mqtt set $$self{instance}: [$xStr]");
-        &main::print_log(
+        $self->debug( 1, "mqtt set $$self{instance}: [$xStr]");
+        $self->debug( 1,
             $self->isa('mqtt')
-            ? "*** mqtt mqtt set $$self{instance}: isa mqtt"
-            : "*** mqtt mqtt set $$self{instance}: is nota mqtt"
+            ? "mqtt set $$self{instance}: is an mqtt object"
+            : "mqtt set $$self{instance}: is not an mqtt object"
         );
     }
 
@@ -740,21 +812,46 @@ sub set {
 ### a write?)
 ###
 sub pub_msg {
-    my $self = shift;
+    my ( $self, %p_objects ) = @_;
+
+    my $Caller = ((caller(1))[3] // '[undef]');	# Who called us.
 
     # Check for connectivity
     if ( $self->isNotConnected() ) {
 
         # First say something
-        &main::print_log("*** mqtt $$self{instance} failed ($$self{host}/$$self{port}/$$self{topic})");
+        $self->error("$$self{instance} is not connected -- failed to publish to $p_objects{topic}=$p_objects{message}, Caller:$Caller");
 
-        # Then do something (reconnect)
+        # Check_for_data should initiate reconnect
 
-        # Skip if we're not connected
+# 	###
+# 	### This needs a lot of work
+# 	###
+# 	### @FIXME: failed connection
+# 	if ( 'off' ne $self->{state} ) {
+# 	    my $inst = $self->{instance};
+# 
+# 	    if ($$self{recon_timer}->inactive) {
+# 		    $self->log("$inst connection failed ($$self{host}/$$self{port}/$$self{topic}), I will try to reconnect in 20 seconds");
+# 		    $$self{recon_timer}->set(20, sub { $MQTT_Data{$inst}{self}->mqtt_connect() });
+# 	    }
+# 
+# 	    # check the state to see if it's off already
+# 
+# 	    $self->set( 'off', $self );
+# 	}
+
+        return;
+    }
+    $self->debug( 1, "$$self{instance} Pub: R:$p_objects{retain} T:'$p_objects{topic}' M:'$p_objects{message}', Caller:$Caller" );
+
+    # Perform a sanity check. A bad topic can cause the MQTT server to hang up on us, losing subsequent messages for 20 seconds.
+    if ($p_objects{topic} =~ /[+#]/) {
+        $self->error(qq<pub_msg rejecting message from $Caller -- topic name "$p_objects{topic}" is invalid.>);
         return;
     }
 
-    $self->send_mqtt_msg(@_);
+    $self->send_mqtt_msg(%p_objects);
 }
 
 # ------------------------------------------------------------------------------
@@ -801,7 +898,7 @@ sub add_item {
 sub remove_all_items {
     my ($self) = @_;
 
-    &main::print_log("*** mqtt mqtt remove_all_items()");
+    $self->log("mqtt remove_all_items()");
 
 =begin comment
     if (ref $$self{objects}) {
@@ -876,19 +973,542 @@ sub remove_item {
 sub parse_data_to_obj {
     my ( $self, $msg, $p_setby ) = @_;
 
-    #
-    for my $obj ( @{ $$self{objects} } ) {
-        if ( "$$obj{topic}" eq "$$msg{topic}" || "$$obj{topic}" eq "$$msg{topic}/set" ) {
-            $obj->set( $$msg{message}, $self, );
-        } 
-        else {
-            &main::print_log ("***mqtt mqtt obj ($$obj{topic}) vs ($$msg{topic})") if ( $main::Debug{mqtt} );
-        }
+    $self->debug( 3, "Msg object: " . Dumper( $msg ) );
+
+    if( !length($msg->{message}) && $msg->{retain} ) {
+	# cleanup message -- ignore
+	return;
     }
 
-=begin comment
+    # 20-12-2020 added support for wildcard mqtt devices e.g. in items.mht
+    # MQTT_DEVICE, MQTT_test_wildcard, , mqtt_1, tele/+/LWT
+    # or for a multilevel wildcard
+    # MQTT_DEVICE, MQTT_test_multi_wildcard, , mqtt_1, tele/#
+    # NOTE, use of multi level wildcards can consume a lot of CPU
+    # it also exits the loop if it finds a match for speed when there is a large number of mqtt devices
+
+    my ( @split_incoming, @split_device, $counter, $device_topic, $message_handled );
+    #
+    $message_handled = 0;
+    for my $obj ( @{ $$self{objects} } ) {
+	# 2021/2/4 -- added support for a mqtt object to listen for a list of topics
+	my @topiclist;
+	if( ref $obj->{topic} eq 'ARRAY' ) {
+	    @topiclist = @{$obj->{topic}};
+	} else {
+	    @topiclist = ( $obj->{topic} );
+	}
+        for $device_topic (@topiclist) {
+	    # check if this mqtt device is a wildcard, and if so replace the wildcard characters
+	    # with the incoming message topic pieces
+	    if (   index( $device_topic, "\+" ) >= 0
+		|| index( $device_topic, "\#" ) >= 0 )
+	    {
+		@split_incoming = split( "/", $msg->{topic} );
+		@split_device   = split( "/", $device_topic );
+		$counter        = 0;
+		foreach (@split_device) {
+		    if ( $split_device[$counter] eq "+"  &&  defined $split_incoming[$counter] ) {
+			$device_topic =~ s/\+/$split_incoming[$counter]/;
+		    }
+		    if ( $split_device[$counter] eq "#" ) {
+			if( index( $device_topic, '#' ) < length( $msg->{topic} ) ) {
+			    $device_topic = substr( $device_topic, 0, index( $device_topic, "#" ) ) . substr( $$msg{topic}, index( $device_topic, "#" ) );
+			}
+			last;
+		    }
+		    $counter++;
+		}
+	    }
+    
+	    # the edited device topic is now ready to compare with the incoming message topic
+	    if ( $device_topic eq $msg->{topic} ) {
+		if( $obj->can( 'receive_mqtt_message' ) ) {
+		    $obj->receive_mqtt_message( $msg->{topic}, $msg->{message}, $msg->{retain} );
+		} else {
+		    $obj->{mqtt_retained} = $msg->{retain};
+		    $obj->{set_by_topic} = $msg->{topic};
+		    $obj->set( $msg->{message}, $self );
+		}
+		$message_handled = 1;
+    
+		# Note that multiple objects may listen for same topic and distinguish based on payload - must keep looping
+		# last;
+	    }
+	}
+    }
+    if( !$message_handled ) {
+	$self->debug( 2, "UNHANDLED MESSAGE $$msg{topic} -- $$msg{message}" );
+    }
+    if( $msg->{retain} ) {
+	# this is a retained message from the mqtt broker -- record it so if we want to clean up the retained messages in the broker, we can
+	$self->debug( 2, "ADDED RETAINED TOPIC $$msg{topic}" );
+	$self->{retained_topics}->{$$msg{topic}} = $message_handled;
+    }
+}
+
+sub generate_voice_commands {
+    my ($self) = @_;
+
+    if ($self->{init_v_cmd} == 0) {
+        my $object_string;
+        my $object_name = $self->get_object_name;
+        $self->{init_v_cmd} = 1;
+        &main::print_log("Generating Voice commands for MQTT Server $object_name");
+
+        my $voice_cmds = $self->get_voice_cmds();
+        my $i          = 1;
+        foreach my $cmd ( keys %$voice_cmds ) {
+
+            #get object name to use as part of variable in voice command
+            my $object_name_v = $object_name . '_' . $i . '_v';
+            $object_string .= "use vars '${object_name}_${i}_v';\n";
+
+            #Initialize the voice command with all of the possible device commands
+            $object_string .= $object_name . "_" . $i . "_v  = new Voice_Cmd '$cmd';\n";
+
+            #Tie the proper routine to each voice command
+            my $tie_event = $voice_cmds->{$cmd};
+            $tie_event =~ s/\(SAID\)$/($object_name_v->said\(\)\)/ if ($tie_event =~ m/\(SAID\)$/);
+            $object_string .= $object_name . "_" . $i . "_v -> tie_event(q~" . $tie_event . "~);\n\n";    #, '$command $cmd');\n\n";
+
+            #Add this object to the list of MQTT Server Voice Commands on the Web Interface
+            $object_string .= ::store_object_data( $object_name_v, 'Voice_Cmd', 'MQTT', 'Controller_commands' );
+            $i++;
+        }
+        #Evaluate the resulting object generating string
+        package main;
+        eval $object_string;
+        print "Error in generating Voice Commands for mqtt interface: $@\n" if $@;
+
+        package HA_Server;
+    }
+}
+
+sub get_voice_cmds {
+    my ($self) = @_;
+    my $command = $self->get_object_name;
+    $command =~ s/^\$//;
+    $command =~ tr/_/-/; ## underscores in Voice_cmds cause them not to work.
+
+    my $objects = "[";    
+    my %seen;
+    for my $obj ( @{ $self->{objects} } ) {
+        next if $seen{$obj->{object_name}}++; #remove duplicate entity names
+        $objects .= $obj->{object_name} . ",";
+    }
+    chop $objects if (length($objects) > 1);
+    $objects .= "]";
+    $objects =~ s/\$//g;
+    $objects =~ tr/_/-/; ## underscores in Voice_cmds cause them not to work.
+    
+    #a bit of a kludge to pass along the voice command option, get the said value from the voice command.
+    my $object_name = $self->get_object_name();
+    my %global_voice_cmds = (
+        "<global> -- List all mqtt interfaces to the print log"   => "&mqtt::print_interface_list()",
+        "<global> -- Publish current states of all local items"  => "&mqtt_LocalItem::publish_current_states()",
+        "<global> -- Write all discovered items to <data_dir>/mqtt_discovered_items.mht.gen" => "&mqtt::write_discovered_items( '$::config_parms{data_dir}/mqtt_discovered_items.mht.gen' )",
+	);
+    my %voice_cmds = (
+        "$command -- List retained topics"  => "${object_name}->list_retained_topics()",
+        "$command -- Publish discovery data"  => "${object_name}->publish_discovery_data()",
+        "$command -- Publish current states of local items"  => "${object_name}->publish_current_states()",
+        "$command -- Cleanup published info and republish"  => "${object_name}->cleanup_published_topics()",
+        "$command -- Cleanup only discovery info and republish"  => "${object_name}->cleanup_discovery_topics()",
+        "$command -- Cleanup all retained topics on mqtt server and republish (BE CAREFUL)"  => "${object_name}->cleanup_all_retained_topics()",
+#         'List [all,active,inactive] ' . $command . ' objects to the print log'   => $self->get_object_name . '->print_object_list(SAID)',
+#         "Print $objects $command attributes to the print log"             => "${object_name}->print_object_attrs(SAID)",
+    );
+    if( $init_global_v_cmd == 0 ) {
+        $init_global_v_cmd = 1;
+	%voice_cmds = (%global_voice_cmds, %voice_cmds);
+    }
+
+    return \%voice_cmds;
+}
+
+# ------------------------------------------------------------------------------
+
+=item C<(print_interface_list())>
 =cut
 
+sub print_interface_list {
+    my @interfaces;
+
+    for my $inst (keys %MQTT_Data) {
+	push @interfaces, $MQTT_Data{$inst}{self}->{instance};
+    }
+    &mqtt::log( undef, "MQTT interface list: " . join( ',', @interfaces ) );
+}
+
+=item C<(get_interface_list())>
+=cut
+
+sub get_interface_list {
+    my @interfaces;
+
+    for my $inst (keys %MQTT_Data) {
+	push @interfaces, $MQTT_Data{$inst}{self};
+    }
+    return ( @interfaces );
+}
+
+# ------------------------------------------------------------------------------
+
+=item C<(cleanup_retained_topics( @pattern_list ))>
+
+Over time, retained messages accumulate in the broker.  When objects change names
+or are removed from your setup, the retained messages remain.
+
+This function is used to delete retained topics from the broker.  It will
+publish an empty message to all retained topics matching a pattern in the
+pattern list that misterhouse has received from this broker.
+
+Using the pattern '.*' will remove all retained topics.  BE CAREFUL.  This will
+remove all retained topics whether you published them or not.  Thus discovery
+messages and current state messages for all mqtt objects in your system will
+be deleted from the mqtt server. Pretty much all mqtt devices will eventually
+republish discovery and state info, although some may need to be rebooted for
+that to happen.
+
+=cut
+
+sub cleanup_retained_topics {
+    my ($self, @topic_pattern_list) = @_;
+    my $clean_count;
+    my $ignore_count;
+
+    if( scalar(@topic_pattern_list) == 0 ) {
+	&mqtt::error( undef, "cleanup_retained_topics -- must specify pattern" );
+	return;
+    }
+    $self->debug( 2, "cleanup topic pattern list: @topic_pattern_list" );
+    $clean_count = 0;
+    $ignore_count = 0;
+    for my $topic ( keys %{$self->{retained_topics}} ) {
+	my $match = 0;
+	for my $topic_pattern (@topic_pattern_list) {
+	    if( $topic_pattern ) {
+		if( $topic =~ m|^${topic_pattern}| ) {
+		    $match = 1;
+		}
+	    }
+	}
+	if( $match ) {
+	    ++$clean_count;
+	    $self->pub_msg( 
+		message_type => MQTT_PUBLISH,
+		retain       => 1,
+		topic        => $topic,
+		message      => ''
+	    );
+	    delete $self->{retained_topics}->{$topic};
+	} else {
+	    ++$ignore_count;
+	    $self->debug( 2, "'$topic' being ignored for cleanup" );
+	}
+    }
+    $self->log( "Cleanup unhandled topics for $self->{instance} complete:  $clean_count cleaned, $ignore_count ignored" );
+}
+
+
+=item C<(list_retained_topics())>
+
+This function will list all retained topics received by misterhouse, and some
+indication as to whether the topic was handled by some defined object.
+
+=cut
+
+sub list_retained_topics {
+    my ($self) = @_;
+    my @interface_list;
+
+    if( $self ) {
+	@interface_list = ( $self );
+    } else {
+	@interface_list = &get_interface_list();
+    }
+
+    foreach my $interface ( @interface_list ) {
+	$interface->log( "Listing retained topics for: $interface->{instance}" );
+	for my $topic ( keys %{$interface->{retained_topics}} ) {
+	    my $handled = $interface->{retained_topics}->{$topic};
+	    $interface->log( "$$interface{instance} retained topic: ($handled) $topic" );
+	}
+    }
+}
+
+=item C<(cleanup_all_retained_topics())>
+
+This function will delete all retained topics on the mqtt server.
+It will then republish discovery data and current item states.
+
+=cut
+
+sub cleanup_all_retained_topics {
+    my ($self) = @_;
+
+    $self->cleanup_retained_topics( '.*' );
+    $self->publish_discovery_data();
+    $self->publish_current_states();
+}
+
+=item C<(cleanup_published_topics())>
+
+This function will delete all retained topics on the mqtt server for published
+messages for LocalItems.  It is based on <node_id>s used by discoverable items.
+
+It will then republish discovery data and current item states.
+
+=cut
+
+sub cleanup_published_topics {
+    my ($self) = @_;
+    my $seen_disc = {};
+    my $seen_local = {};
+
+    for my $obj ( @{ $self->{objects} } ) {
+	if( $obj->{discoverable}  &&  $obj->{node_id}  &&  !$seen_disc->{$obj->{node_id}} ) {
+	    $seen_disc->{$obj->{node_id}} = 1;
+	    $self->cleanup_retained_topics( "$self->{discovery_prefix}/.*/$obj->{node_id}/.*" );
+	}
+        if( $self->isa('mqtt_LocalItem')  &&  $obj->{node_id}  &&  !$seen_local->{$obj->{node_id}} ) {
+	    $seen_local->{$obj->{node_id}} = 1;
+	    $self->cleanup_retained_topics( "$obj->{node_id}/.*" );
+	}
+    }
+    $self->publish_discovery_data();
+    $self->publish_current_states();
+}
+
+=item C<(cleanup_discovery_topics())>
+
+This function will delete all retained topics on the mqtt server for discovery
+messages for LocalItems.  It is based on <node_id>s used by discoverable items.
+
+It will then republish discovery data and current item states.
+
+=cut
+
+sub cleanup_discovery_topics {
+    my ($self) = @_;
+    my $seen = {};
+
+    for my $obj ( @{ $self->{objects} } ) {
+	if( $obj->{discoverable}  &&  $obj->{node_id}  &&  !$seen->{$obj->{node_id}} ) {
+	    $seen->{$obj->{node_id}} = 1;
+	    $self->cleanup_retained_topics( "$self->{discovery_prefix}/.*/$obj->{node_id}/.*" );
+	}
+    }
+    $self->publish_discovery_data();
+    $self->publish_current_states();
+}
+
+# ------------------------------------------------------------------------------
+
+=item C<(create_discovery_data())>
+
+Create discovery messages for each discoverable item.
+
+=cut
+
+sub create_discovery_data {
+    my ($self) = @_;
+    my $obj;
+
+    if( !$self->isConnected ) {
+	$self->error( "Unable to publish discovery data -- $self->{instance} not connected" );
+	return 0;
+    }
+    $self->log( "Creating and publishing discovery data for all discoverable objects" );
+    for my $obj ( @{ $self->{objects} } ) {
+	if( $obj->can( 'create_discovery_message' ) ) {
+	    $obj->create_discovery_message();
+	}
+    }
+    return 1;
+}
+
+=item C<(publish_discovery_data())>
+
+Publish discovery messages for each discoverable item.
+
+=cut
+
+sub publish_discovery_data {
+    my ($self) = @_;
+    my $obj;
+
+    if( !$self->isConnected ) {
+	$self->error( "Unable to publish discovery data -- $self->{instance} not connected" );
+	return 0;
+    }
+    $self->log( "Publishing discovery data" );
+    for my $obj ( @{ $self->{objects} } ) {
+	if( $obj->can( 'publish_discovery_message' ) ) {
+	    $obj->publish_discovery_message();
+	}
+    }
+    return 1;
+}
+
+=item C<(publish_current_states( only_unpublished ))>
+    Function to publish the current states of all local mqtt objects for this mqtt server
+
+    If only_unpublished is true, only the current states of objects that have not published
+    their state since MH started will be published.
+
+    This function should be called after the local item states have been restored after
+    startup if there is no initial function that gets current states of local items.
+        For example, INSTEON devices are polled at startup of misterhouse to determine current states
+	This polling will set the state of the local item which will publish to mqtt
+    Also, when states are published the retain flag is set, so the mqtt server will have
+    a retained state for each LocalItem.
+=cut
+
+sub publish_current_states {
+    my( $self, $only_unpublished ) = @_;
+    my $obj;
+    my $msg;
+    my $msg_txt;
+    my $hass_type;
+    my $obj_id;
+
+    $self->log( "$self->{name} publishing current state data for local objects" );
+    for my $obj ( @{ $self->{objects} } ) {
+	if( $obj->can( 'publish_state' ) ) {
+	    $obj->publish_state( $only_unpublished );
+	}
+    }
+}
+
+=item C<write_discovered_items(filename, autoupdate)>
+
+    Writes out all mqtt items that have been discovered to a .mqt file.
+    Note that this includes items that were created locally as discovered
+    items in a .mht file as well as newly discovered items.
+    If autoupdate is true, the file will be updated with each new discovery message.
+
+=cut
+
+my $discovered_items_filename;
+
+sub write_discovered_items {
+    my ($outfilename, $autoupdate) = @_;
+    my $interface;
+    my $f;
+    my @sorted_list;
+    
+    $outfilename = $outfilename || $discovered_items_filename;
+    if( !$outfilename ) {
+	return;
+    }
+    &mqtt::debug( undef, 1, "Writing discovered items to '$outfilename'" );
+    if( defined $autoupdate ) {
+	# only change autoupdate file if $autoupdate is actually defined
+	if( $autoupdate ) {
+	    $discovered_items_filename = $outfilename;
+	} else {
+	    $discovered_items_filename = undef;
+	}
+    }
+    if( !open( $f, "> ${outfilename}" ) ) {
+	&mqtt::error( undef, "Unable to open discovery target file '${outfilename}" );
+	return;
+    }
+    print {$f} "Format = A\n\n";
+    foreach my $interface ( &mqtt::get_interface_list() ) {
+	@sorted_list = sort { $a->get_object_name() cmp $b->get_object_name() } @{$interface->{objects}};
+	for my $obj ( @sorted_list ) {
+	    if( defined $obj->{disc_mode}  &&  $obj->{disc_mode} ne 'local' ) {
+		my $obj_name = $obj->get_object_name;
+		print "getting discovery object name for $obj_name\n";
+		my $disc_obj_name = $obj->{disc_interface}->get_object_name;
+		$obj_name =~ s/^\$//;
+		$disc_obj_name =~ s/^\$//;
+		print {$f} "MQTT_DISCOVEREDITEM, $obj_name, $disc_obj_name, $obj->{disc_topic}, $obj->{disc_msg}\n\n";
+	    }
+	}
+    }
+    close( $f );
+}
+
+=item C<write_discovery_messages(filename)>
+
+    Writes out all mqtt items that have been discovered to a file with readable discovery messages.
+
+=cut
+
+sub write_discovery_messages {
+    my ($outfilename) = @_;
+    my $interface;
+    my $f;
+    my @sorted_list;
+    
+    if( !$outfilename ) {
+	return;
+    }
+    &mqtt::debug( undef, 1, "Writing discovery messages to '$outfilename'" );
+    if( !open( $f, "> ${outfilename}" ) ) {
+	&mqtt::error( undef, "Unable to open discovery target file '${outfilename}" );
+	return;
+    }
+    foreach my $interface ( &mqtt::get_interface_list() ) {
+	@sorted_list = sort { $a->get_object_name() cmp $b->get_object_name() } @{$interface->{objects}};
+	for my $obj ( @sorted_list ) {
+	    if( defined $obj->{disc_mode}  &&  $obj->{disc_mode} ne 'local' ) {
+		my $obj_name = $obj->get_object_name;
+		my $disc_obj_name = $obj->{disc_interface}->get_object_name;
+		$obj_name =~ s/^\$//;
+		$disc_obj_name =~ s/^\$//;
+		print {$f} "$disc_obj_name:$obj_name ($obj->{mqtt_friendly_name})  T:$obj->{disc_topic}\n";
+		my $dumper = Data::Dumper->new( [$obj->{disc}] );
+		print {$f} $dumper->Dump() . "\n\n";
+	    }
+	}
+    }
+    close( $f );
+}
+
+# ------------------------------------------------------------------------------
+
+
+=item C<(publish_mqtt_message( topic, message, retain ))>
+
+Publish an mqtt message.
+
+=cut
+
+sub publish_mqtt_message {
+    my ($self, $topic, $msg, $retain ) = @_;
+
+    $retain = 0 if !defined($retain);
+    $self->pub_msg( 
+	message_type => MQTT_PUBLISH,
+	retain       => $retain,
+	topic        => $topic,
+	message      => $msg
+    );
+}
+
+# ------------------------------------------------------------------------------
+
+=item C<(broadcast_mqtt_message( topic, message, retain ))>
+
+Broadcast an mqtt message to all defined brokers.
+
+=cut
+
+sub broadcast_mqtt_message {
+    my ($topic, $msg, $retain ) = @_;
+    my @instances;
+
+    $retain = 0 if !defined($retain);
+    (@instances) = (keys %MQTT_Data);
+    foreach my $inst ( @instances ) {
+        my $self = $MQTT_Data{$inst}{self};
+	$self->publish_mqtt_message( $topic, $msg, $retain );
+    }
 }
 
 # -[ Fini - mqtt ]--------------------------------------------------------------
@@ -951,7 +1571,7 @@ sub new {
     $$self{topic}   = $topic;
     $$self{message} = '';
     $$self{retain}  = $retain || 0;
-    $$self{QOS}     = $qos || 0;
+    $$self{QOS}     = $qos    || 0;
 
     $$self{instance}->add($self);
 
@@ -986,21 +1606,19 @@ sub set {
         ###
         ### Incoming (MQTT to MH)
         ###
-        &::print_log( "*** mqtt mqtt_Item nom to MQTT to MH " . $self->get_object_name() . "::set($msg, $p_setby)" )
-          if $main::Debug{mqtt};
+        $self->debug( 1, "mqtt_Item nom to MQTT to MH " . ($self->get_object_name()//'<undef>')
+	                 . "::set(" . ($msg//'<undef>') . ", $p_setby)" );
     }
     else {
         ###
         ### Outgoing (MH to MQTT)
         ###
-        if ( $main::Debug{mqtt} ) {
-            if ( defined( $self->get_object_name() ) ) {
-                &::print_log( "*** mqtt mqtt_Item nom to MH to MQTT (" . $self->get_object_name() . ') no p_setby ::set($msg, $p_setby)' );
-            }
-            else {
-                &::print_log('*** mqtt mqtt_Item nom to MH to MQTT () no p_setby ::set($msg, $p_setby)');
-            }
-        }
+	if ( defined( $self->get_object_name() ) ) {
+	    $self->debug( 1, "mqtt_Item nom to MH to MQTT (" . $self->get_object_name() . ") no p_setby ::set($msg, $p_setby)" );
+	}
+	else {
+	    $self->debug( 1, "mqtt_Item nom to MH to MQTT () no p_setby ::set($msg, $p_setby)" );
+	}
         ###
         ### I need the instance socket, the obj's topic and message
         ### in order to send the message

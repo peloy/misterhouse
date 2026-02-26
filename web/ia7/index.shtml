@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html><head><title>MisterHouse 5.1</title>
+<html><head><title>MisterHouse 6.0</title>
 	<meta name="viewport" content="width=device-width, initial-scale=1.0">
 	
 	<meta name="apple-mobile-web-app-capable" content="yes">
@@ -54,9 +54,9 @@
     	}
     }
 	.btn-direct {
-	  border-style: solid;
-	  border-width: 2px;
-	  border-color: black;
+	  border-style: solid !important;
+	  border-width: 2px !important;
+	  border-color: black !important;
 	}
 	
 	.btn-direct:focus,.btn-direct:active {
@@ -342,6 +342,36 @@
       background-color: #834087;
       border-color: #834087;
     }
+    
+    .btn-undef {
+      color: #fff;
+      background-color: #666699;
+      border-color: #834087;
+    }
+    .btn-undef:hover,
+    .btn-undef:focus,
+    .btn-undef:active,
+    .btn-undef.active {
+      color: #fff !important;
+      background-color: #47476b;
+      border-color: #613064;
+    }
+    .btn-undef.disabled:hover,
+    .btn-undef.disabled:focus,
+    .btn-undef.disabled:active,
+    .btn-undef.disabled.active,
+    .btn-undef[disabled]:hover,
+    .btn-undef[disabled]:focus,
+    .btn-undef[disabled]:active,
+    .btn-undef[disabled].active,
+    fieldset[disabled] .btn-undef:hover,
+    fieldset[disabled] .btn-undef:focus,
+    fieldset[disabled] .btn-undef:active,
+    fieldset[disabled] .btn-undef.active {
+      color: #fff;
+      background-color: #666699;
+      border-color: #834087;
+    }    
     
     html, body {
         max-width: 100%;
