@@ -4,26 +4,89 @@ use strict;
 
 # Format = A
 #
+# Example entry.
+# --------------
+#
 # This is Bill Sobel's (bsobel@vipmail.com) table definition
 #
 # Type         Address/Info            Name                                    Groups                                      Other Info
 #
 #X10I,           J1,                     Outside_Front_Light_Coaches,            Outside|Front|Light|NightLighting
 #
-# See mh/code/test/test.mht for an example.
+# The more generalized format is "TYPE, PARM1, PARM2, ...".
 #
-# The more generalized format is "TYPE, PARM1, PARM2, ...". There are lots
-# of types hardcoded below. However, read_table_A is also now extensible, so
-# we don't need to modify it for every new record type. Instead, just create
-# a .pm module in an accessible library that matches the lowercase of the
-# "TYPE" field (e.g. "type.pm") that has a "new" method. read_table_A will 
+# See mh/code/test/test.mht for more examples.
+#
+# Continuation lines.
+# -------------------
+#
+# Long lines may be split across two (or more) lines as follows:
+# 1) Break the long line on a whitespace character
+# 2) Indent the second line with one or more whitespace characters
+# Example: The above sample line, split into three lines:
+#
+#X10I,           J1,
+#    Outside_Front_Light_Coaches,
+#    Outside|Front|Light|NightLighting
+#
+# Note: the exact amount of whitespace at the break is not normally
+# preserved, but see below.
+#
+#
+# Special or difficult cases for line splitting: 
+# If the line has no whitespace to split on, or if the exact amount of 
+# whitespace is important (e.g. "my    data"), 
+# 1) split the line wherever necessary/desired
+# 2) start the continuation line with some whitespace and a backslash. The
+# whitespace and backslash will be removed, and anything after it
+# including any exact amount of whitespace, will be retained.
+#
+# Example (pseudo-data):
+#
+# Before:
+# myline the following four spaces->    <-must be preserved.
+#
+# After splitting the line:
+# myline the following four spaces->
+#   \    <-must be preserved.
+#
+# In the above, the two space and backslash are removed, the four spaces
+# after the backslash are retained to produce the original line.
+#
+# Symbol substitution.
+# --------------------
+#
+# Symbol substitution is now supported. Symbol substitution allows a repeated
+# character string to be assigned once to a symbolic name, and then the
+# symbolic name can be used as a stand-in for the string. This can ease 
+# maintenance, as changes to the string only need to be applied in one
+# place. Assignments occur with a "Define" statement. ("Define" is case-
+# insensitive, the rest of the statement is case sensitive.) The format
+# is "Define symbol=string", where "symbol" is any desired character string
+# not containing '=', and "string" is the string to be assigned to it.
+# It is recommended but not required that the symbol begin and end with 
+# an unusual character, to avoid having the symbol match naturally occuring
+# text later in the file.
+#
+# Example:
+#
+# Define %mqtt_topic%=app/zwave-js-ui/Main_Office
+# MQTT_REMOTEITEM,  Lobby_Motion, , mqttserver, text, %mqtt_topic%/Sensor ...
+# MQTT_REMOTEITEM,  Lobby_Lights, , mqttserver, text, %mqtt_topic%/Light ...
+# MQTT_REMOTEITEM,  Loading_Dock, , mqttserver, text, %mqtt_topic%/Dock ...
+#
+#
+# Extensibility:
+# --------------
+# There are lots of types hardcoded below. However, read_table_A is also now
+# extensible, sowe don't need to modify it for every new record type. Instead,
+# just create a .pm module in an accessible library that matches the lowercase
+# of the "TYPE" field (e.g. "type.pm") that has a "new" method. read_table_A will 
 # load the module and write the code to invoke the new method with the 
 # provided parameters. If the module also has an "init" method, it will be
 # invoked after the "new" method returns, as some MH operations can't be
 # performed until *after* new returns and instantiation completes. See 
 # "lib/read_table_a_sample.pm" for an example module.
-
-#print_log "Using read_table_A.pl";
 
 my ( %groups, %objects, %packages, %addresses, %scene_build_controllers, %scene_build_responders );
 
@@ -1923,90 +1986,86 @@ sub read_table_A {
     #-------------- End AoGSmartHome Objects ----------------
     #-------------- MQTT Objects -----------------
     elsif ( $type eq "MQTT_BROKER" ) {
-         # there must be one record for the broker above any MQTT_DEVICE definitions
-        # it takes the following format
-        # MQTT_BROKER, name_of_broker
-        # e.g.MQTT_BROKER, mqtt_1
+        # there must be one record for the broker above any other MQTT definitions
         require 'mqtt.pm';
-        my ( $name, $topic, $host, $port, $username, $password, $keepalive, @rest ) = @item_info;
+	$grouplist = &get_table_parm( \@item_info, 'grouplist' );
+	$name = &get_table_parm( \@item_info, 'name', 1 );
+	# NOTE: we pull these parms out so we can change the order for the new() function
+        my ( $topic, $host, $port, @other ) = @item_info;
 	$topic =~ s/\*/#/g;
-        $code .= sprintf( "\n\$%-35s = new mqtt(\"%s\", '$host', '$port', '$topic', '$username', '$password', '$keepalive', ", $name, $name)
-	    . join(', ', map({"'$_'"} @rest))
-	    . ");\n";
+        $other = join ', ', ( map { "'$_'" } @other );              # Quote data
+        $object = "mqtt('$name', '$host', '$port', '$topic', $other )";
     }
     elsif ( $type eq "MQTT_DEVICE" ) {
-        # there is one record per mqtt device and it must be below the MQTT_BROKER definition
-        # it takes the following form
-        # MQTT_DEVICE, name_of_device, groups, name_of_broker, topic
-        # e.g. MQTT_DEVICE, MQTT_test, Kitchen, mqtt_1, stat/mh_mqtt_test/SENSOR
+	# this is an old implementation
+	# there is one item per mqtt message and it must be below the MQTT_BROKER definition
         # if the device is to transmit to MH, its topic must match the
-        # config parameter mqtt_topic in the mh.ini file   
+        #   config parameter mqtt_topic in the mh.ini file
+	# ==> RECOMMEND not using this item type, use ITEM types below
         require 'mqtt.pm';
-        my ($MQTT_broker_name, $MQTT_topic);
-        ( $name, $grouplist, $MQTT_broker_name, $MQTT_topic ) = @item_info;
-       
-        $code .= sprintf( "\n\$%-35s = new mqtt_Item(\$%s\,\"%s\");\n",
-            $name, $MQTT_broker_name, $MQTT_topic );
-       
+	$grouplist = &get_table_parm( \@item_info, 'grouplist', 2 );
+	$name = &get_table_parm( \@item_info, 'name', 1 );
+        $other = join ', ', ( map { "'$_'" } @item_info );              # Quote data
+        $object = "mqtt_Item( $other )";
     }
     elsif( $type eq "MQTT_LOCALITEM" ) {
-	# $statetopic and $cmndtopic are optional and have defaults based on $type.
-	my ($local_obj_name, $broker, $type, $topicprefix, $discoverable, $friendly_name, $statetopic, $cmndtopic);
-	($name, $local_obj_name, $broker, $type, $topicprefix, $discoverable, $friendly_name, $statetopic, $cmndtopic) = @item_info;
+	$grouplist = &get_table_parm( \@item_info, 'grouplist' );
+	$name = &get_table_parm( \@item_info, 'name', 1 );
+	# NOTE: we pull these parms out so we can change the order for the new() function
+	my ($local_object_name, $broker, $type, @other) = @item_info;
 	require mqtt_items;
-	if( $broker ) {
-	    $broker = '$' . $broker;
-	} else {
-	    $broker = 'undef';
-	}
-	$code .= "\$${name} = new mqtt_LocalItem( ${broker}, '$name', '$type', \$$local_obj_name, '$topicprefix', $discoverable, '$friendly_name', '$statetopic', '$cmndtopic' );\n";
+        $other = join ', ', ( map { "'$_'" } @other );              # Quote data
+	$object = "mqtt_LocalItem( '$broker', '$name', '$type', '$local_object_name', $other )";
     }
     elsif( $type eq "MQTT_REMOTEITEM" ) {
-	# $statetopic $cmndtopic are optional and have defaults based on $type.
-	($name, $grouplist) = @item_info;	# Need these to stay in scope, so we can assign groups.
-	my ($broker, $type, $topicprefix, $discoverable, $friendly_name, $statetopic, $cmndtopic);
-	($name, $grouplist, $broker, $type, $topicprefix, $discoverable, $friendly_name, $statetopic, $cmndtopic) = @item_info;
+	$grouplist = &get_table_parm( \@item_info, 'grouplist', 2 );
+	$name = &get_table_parm( \@item_info, 'name', 1 );
 	require mqtt_items;
-	$code .= "\$${name} = new mqtt_RemoteItem( \$${broker}, '$type', '$topicprefix', $discoverable, '$friendly_name', '$statetopic', '$cmndtopic');\n";
+        $other = join ', ', ( map { "'$_'" } @item_info );              # Quote data
+	$object = "mqtt_RemoteItem( $other )";
     }
     elsif( $type eq "MQTT_INSTMQTT" ) {
-	my ($broker, $type, $topicprefix, $discoverable, $friendly_name);
-	($name, $grouplist, $broker, $type, $topicprefix, $discoverable, $friendly_name) = @item_info;
+	$grouplist = &get_table_parm( \@item_info, 'grouplist', 2 );
+	$name = &get_table_parm( \@item_info, 'name', 1 );
 	require mqtt_items;
-	$code .= "\$${name} = new mqtt_InstMqttItem( \$${broker}, '$type', '$topicprefix', $discoverable, '$friendly_name' );\n";
+        $other = join ', ', ( map { "'$_'" } @item_info );              # Quote data
+	$object = "mqtt_InstMqttItem( $other )";
     }
     elsif( $type eq "MQTT_DISCOVERY" ) {
-	my ($discovery_topic, $broker, $action);
-	($name, $discovery_topic, $broker, $action) = @item_info;
+	$grouplist = &get_table_parm( \@item_info, 'grouplist' );
+	$name = &get_table_parm( \@item_info, 'name', 1 );
 	require mqtt_discovery;
 	require mqtt_items;
-	$code .= "\$${name} = new mqtt_Discovery( \$${broker}, '$name', '$discovery_topic', '$action' );  #noloop\n";
+	# NOTE: we pull these parms out so we can change the order for the new() function
+        my ($discovery_topic, $broker, @other) = @item_info;
+        $other = join ', ', ( map { "'$_'" } @other );              # Quote data
+	$object = "mqtt_Discovery( '$broker', '$name', '$discovery_topic', $other )";
     }
     elsif( $type eq "MQTT_DISCOVEREDITEM" ) {
-	my ($disc_name, $disc_topic, $disc_msg ); 
+	my ($disc_name, $disc_topic, $disc_msg );
 	($name, $disc_name, $disc_topic, $disc_msg ) = $record =~ /MQTT_DISCOVEREDITEM\s*,\s*([^,]+),\s*([^,]+),\s*([^,]+)\,\s*(.*)$/;
 	$name =~ s/\s*$//;
 	$disc_name =~ s/\s*$//;
 	$disc_topic =~ s/\s*$//;
 	$disc_msg =~ s/\s*$//;
 	$disc_msg =~ s/\'/\\'/g;
-	$code .= "\$${name} = new mqtt_DiscoveredItem( \$${disc_name}, '$name', '$disc_topic', '$disc_msg' );\n";
+	$object = "mqtt_DiscoveredItem( \$${disc_name}, '$name', '$disc_topic', '$disc_msg' );\n";
     }
     #-------------- End MQTT Objects ----------------
     #-------------- Home Assistant Objects -----------------
     elsif( $type eq "HA_SERVER" ) {
-    my ($keepalive, $api_key);
-	($name, $address, $keepalive, $api_key, @other) = @item_info;
+	$grouplist = &get_table_parm( \@item_info, 'grouplist' );
+	$name = &get_table_parm( \@item_info, 'name', 1 );
 	require HA_Item;
-	$code .= "\$${name} = new HA_Server( '$name', '$address', '$keepalive', '$api_key' );\n";
+        $other = join ', ', ( map { "'$_'" } @item_info );              # Quote data
+	$object = "HA_Server( '$name', $other )";
     }
     elsif( $type eq "HA_ITEM" ) {
-    my ($domain, $entity, $ha_server, $options);
-	($name, $domain, $entity, $ha_server, $grouplist, $options, @other) = @item_info;
+	$grouplist = &get_table_parm( \@item_info, 'grouplist', 5 );
+	$name = &get_table_parm( \@item_info, 'name', 1 );
 	require HA_Item;
-	$code .= "\$${name} = new HA_Item( '$domain', '$entity', \$$ha_server ";
-	$code .= ",'$options' " if ($options);
-	$code .= ");\n";
+        $other = join ', ', ( map { "'$_'" } @item_info );              # Quote data
+	$object = "HA_Item( $other )";
     }
     #-------------- End Home Assistant Objects -----------------
     elsif ( $type =~ /PLCBUS_.*/ ) {
@@ -2122,14 +2181,13 @@ sub read_table_finish_A {
         #Loop through the controller hash
         if ( exists $scene_build_controllers{$scene} ) {
             foreach my $scene_controller (
-                keys %{ $scene_build_controllers{$scene} } )
+                sort (keys %{ $scene_build_controllers{$scene} } ) )
             {
                 if ( $objects{$scene_controller} ) {
 
                     #Make a link to each responder in the responder hash
-                    while ( my ( $scene_responder, $responder_data ) =
-                        each( %{ $scene_build_responders{$scene} } ) )
-                    {
+                    foreach my $scene_responder ( sort ( keys ( %{ $scene_build_responders{$scene} } ) ) ) {
+			my $responder_data = $scene_build_responders{$scene}{$scene_responder};
                         my ( $on_level, $ramp_rate ) =
                           split( ',', $responder_data );
 
@@ -2222,6 +2280,15 @@ sub read_table_grouplist_A {
 }
 
 
+sub read_table_preprocess_A {
+# Preprocess lines to implement continuation lines and symbol substitution.
+#
+# See handy_utilities.pl::main::mht_preprocess_line_continuation for 
+# details on line continuation.
+#
+    main::mht_preprocess_line_continuation(@_);
+    main::mht_preprocess_symbol_substitution(@_);
+}
 
 #This is called inside each definition, this is using SCENE_BUILD as an example:
 # Called with :
@@ -2331,88 +2398,3 @@ sub validate_def {
 }
 
 1;
-
-#
-# $Log: read_table_A.pl,v $
-# Revision 1.29  2006/01/29 20:30:17  winter
-# *** empty log message ***
-#
-# Revision 1.28  2005/10/02 17:24:47  winter
-# *** empty log message ***
-#
-# Revision 1.27  2005/05/22 18:13:07  winter
-# *** empty log message ***
-#
-# Revision 1.26  2005/03/20 19:02:02  winter
-# *** empty log message ***
-#
-# Revision 1.25  2004/11/22 22:57:26  winter
-# *** empty log message ***
-#
-# Revision 1.24  2004/07/18 22:16:37  winter
-# *** empty log message ***
-#
-# Revision 1.23  2004/06/06 21:38:44  winter
-# *** empty log message ***
-#
-# Revision 1.22  2004/03/23 01:58:08  winter
-# *** empty log message ***
-#
-# Revision 1.21  2003/12/22 00:25:06  winter
-#  - 2.86 release
-#
-# Revision 1.20  2003/11/23 20:26:02  winter
-#  - 2.84 release
-#
-# Revision 1.19  2003/09/02 02:48:46  winter
-#  - 2.83 release
-#
-# Revision 1.18  2003/07/06 17:55:12  winter
-#  - 2.82 release
-#
-# Revision 1.17  2003/01/12 20:39:21  winter
-#  - 2.76 release
-#
-# Revision 1.16  2002/12/24 03:05:08  winter
-# - 2.75 release
-#
-# Revision 1.15  2002/11/10 01:59:57  winter
-# - 2.73 release
-#
-# Revision 1.14  2002/08/22 13:45:50  winter
-# - 2.70 release
-#
-# Revision 1.13  2002/08/22 04:33:20  winter
-# - 2.70 release
-#
-# Revision 1.12  2002/05/28 13:07:52  winter
-# - 2.68 release
-#
-# Revision 1.11  2001/11/18 22:51:43  winter
-# - 2.61 release
-#
-# Revision 1.10  2001/10/21 01:22:33  winter
-# - 2.60 release
-#
-# Revision 1.9  2001/08/12 04:02:58  winter
-# - 2.57 update
-#
-# Revision 1.8  2001/03/24 18:08:38  winter
-# - 2.47 release
-#
-# Revision 1.7  2001/02/04 20:31:31  winter
-# - 2.43 release
-#
-# Revision 1.6  2000/12/21 18:54:15  winter
-# - 2.38 release
-#
-# Revision 1.5  2000/12/03 19:38:55  winter
-# - 2.36 release
-#
-# Revision 1.4  2000/10/22 16:48:29  winter
-# - 2.32 release
-#
-# Revision 1.3  2000/10/01 23:29:40  winter
-# - 2.29 release
-#
-#
